@@ -171,6 +171,19 @@ impl PySpace {
     }
 
     #[staticmethod]
+    fn harmonics(n: usize, period: f64, start: f64) -> PyResult<Self> {
+        space(rebasis::Space::harmonics(n, period, start))
+    }
+
+    #[staticmethod]
+    fn bsplines_periodic(breakpoints: Bound<'_, PyArray1<f64>>, degree: usize) -> PyResult<Self> {
+        space(rebasis::Space::bsplines_periodic(
+            &read_vec(&breakpoints, "breakpoints")?,
+            degree,
+        ))
+    }
+
+    #[staticmethod]
     fn bsplines_clamped(breakpoints: Bound<'_, PyArray1<f64>>, degree: usize) -> PyResult<Self> {
         space(rebasis::Space::bsplines_clamped(
             &read_vec(&breakpoints, "breakpoints")?,

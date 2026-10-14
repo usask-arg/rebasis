@@ -46,7 +46,11 @@ Choosing the pieces:
   either unconstrained or given a Gaussian prior. Where data are missing the estimate relaxes
   towards the mean, so a mean with the field's large-scale structure matters there; a prior
   on terms the data only partly determine (a drift through a month sampled in its first half,
-  structure beyond the data's latitudes) keeps them from being extrapolated.
+  structure beyond the data's latitudes) keeps them from being extrapolated. Periodic bases,
+  {meth}`~rebasis.Space.harmonics` (zonal waves, annual cycles) and
+  {meth}`~rebasis.Space.bsplines_periodic`, give the mean structure in longitude: with waves in
+  the mean, a field that is a sum of waves has its zonal mean recovered exactly even from a
+  single longitude sector.
 - **Several quantities at once**: `values` of shape (n, k), e.g. one column per altitude,
   share the covariance and, for columns with the same valid observations, its factorization.
   Normalize the columns (e.g. by their means) when one covariance should describe them all.

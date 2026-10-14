@@ -198,6 +198,14 @@ pub enum Profile {
     /// exp(−|t|/ℓ), 3/2 is (1 + u) e^(−u) with u = √3 |t|/ℓ, 5/2 is (1 + u + u²/3) e^(−u) with
     /// u = √5 |t|/ℓ. Used as prior covariances; the support is `cutoff` lengths either side.
     Matern { order: MaternOrder, length: f64 },
+    /// cos(2π k (center + t) / P + phase): a harmonic of period P in absolute coordinates
+    /// (phase −π/2 gives the sine). Not a line shape: a basis function for periodic structure
+    /// (longitude waves, annual cycles), on the support it is given.
+    Harmonic {
+        wavenumber: f64,
+        period: f64,
+        phase: f64,
+    },
 }
 
 /// The smoothness ν of a [`Profile::Matern`].
@@ -298,6 +306,20 @@ impl Profile {
         Ok(Profile::Matern { order, length })
     }
 
+    /// cos(2π k x / P + phase) in absolute coordinates for an element centred at `center`.
+    pub fn harmonic(wavenumber: f64, period: f64, phase: f64, center: f64) -> Result<Self> {
+        positive("wavenumber", wavenumber)?;
+        positive("period", period)?;
+        if !(phase.is_finite() && center.is_finite()) {
+            return invalid("harmonic phase and center must be finite");
+        }
+        Ok(Profile::Harmonic {
+            wavenumber,
+            period,
+            phase: phase + 2.0 * std::f64::consts::PI * wavenumber * center / period,
+        })
+    }
+
     pub fn fts(max_opd: f64, apodization: Apodization) -> Result<Self> {
         positive("max_opd", max_opd)?;
         let peak = apodization.line_shape(0.0);
@@ -355,6 +377,11 @@ impl Profile {
                 apodization,
                 inv_peak,
             } => apodization.line_shape(2.0 * std::f64::consts::PI * max_opd * t) * inv_peak,
+            Profile::Harmonic {
+                wavenumber,
+                period,
+                phase,
+            } => (2.0 * std::f64::consts::PI * wavenumber * t / period + phase).cos(),
             Profile::Matern { order, length } => {
                 let u = order.rate() * t.abs() / length;
                 let poly = match order {
@@ -417,6 +444,14 @@ impl Profile {
             } => {
                 let k = 2.0 * pi * max_opd;
                 k * apodization.line_shape_derivative(k * t) * inv_peak
+            }
+            Profile::Harmonic {
+                wavenumber,
+                period,
+                phase,
+            } => {
+                let w = 2.0 * std::f64::consts::PI * wavenumber / period;
+                -w * (w * t + phase).sin()
             }
             Profile::Matern { order, length } => {
                 let a = order.rate() / length;
@@ -573,6 +608,10 @@ impl Profile {
             } => half_width.max(0.5 * FWHM_PER_SIGMA * sigma),
             // first zero of the unapodized sinc
             Profile::Fts { max_opd, .. } => 0.5 / max_opd,
+            // a quarter wavelength
+            Profile::Harmonic {
+                wavenumber, period, ..
+            } => 0.25 * period / wavenumber,
             // the roots of the closed forms at one half, divided by the rate
             Profile::Matern { order, length } => {
                 let u = match order {
@@ -600,6 +639,8 @@ impl Profile {
                 half_width, sigma, ..
             } => (half_width + cutoff * sigma, half_width + cutoff * sigma),
             Profile::Matern { length, .. } => (cutoff * length, cutoff * length),
+            // the half width of the domain, in absolute units
+            Profile::Harmonic { .. } => (cutoff, cutoff),
             _ => (cutoff * self.hwhm(), cutoff * self.hwhm()),
         };
         Ok(r)
@@ -634,6 +675,10 @@ impl Profile {
             Profile::Fts { max_opd, .. } => 0.25 / max_opd,
             // polynomial × exponential on each side of the (knotted) center
             Profile::Matern { order, length } => 0.5 * length / order.rate(),
+            // a quarter wavelength, as for the FTS line shapes
+            Profile::Harmonic {
+                wavenumber, period, ..
+            } => 0.25 * period / wavenumber,
         }
     }
 }

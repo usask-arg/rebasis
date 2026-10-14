@@ -93,6 +93,21 @@ class Space:
         inner = _rebasis.Space.bsplines_clamped(_vec(breakpoints, "breakpoints"), int(degree))
         return cls(inner, f"bsplines{degree}")
 
+    @classmethod
+    def harmonics(cls, n: int, period: float = 360.0, start: float = 0.0) -> Space:
+        """cos(2πkx/P) and sin(2πkx/P) for k = 1..n (2n functions, in that order) on
+        [start, start + period]: zonal waves in a mean (with longitude in that range), annual
+        cycles. The constant is not included, since mean terms add their own."""
+        return cls(_rebasis.Space.harmonics(int(n), float(period), float(start)), "harmonics")
+
+    @classmethod
+    def bsplines_periodic(cls, breakpoints, degree: int = 3) -> Space:
+        """Periodic B-splines of ``degree`` (0-3): ``breakpoints`` span one period, from start
+        to start + P, and the len(breakpoints) − 1 functions wrap around it, forming a partition
+        of unity on [start, start + P). Localized periodic structure, e.g. in longitude."""
+        inner = _rebasis.Space.bsplines_periodic(_vec(breakpoints, "breakpoints"), int(degree))
+        return cls(inner, f"periodic_bsplines{degree}")
+
     # ------------------------------------------------------------ line shapes
 
     @classmethod

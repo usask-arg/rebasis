@@ -28,6 +28,8 @@ EDGES = np.arange(-80.0, 80.0 + 1e-9, 10.0)
 LAT_KNOT_SPACING = 30.0
 TWO_SCALE = False
 LAT_PROFILE = False
+WAVES = 0
+TWO_SCALE_PROFILE = False
 DRIFT_PRIOR = None  # ppmv over the month; None: an unconstrained linear drift
 
 
@@ -48,7 +50,12 @@ def mean_basis(ndays, lat_range=(-90.0, 90.0)):
     return [
         rb.MeanTerm({"lat": lat}),
         rb.MeanTerm({"lat": lat, "time": drift}, prior_std=DRIFT_PRIOR),
-    ]
+    ] + (
+        # zonal waves 1..WAVES with latitude-dependent amplitudes, shrunk by a fitted prior
+        [rb.MeanTerm({"lat": lat, "lon": rb.Space.harmonics(WAVES, 360.0)}, prior_std=0.1)]
+        if WAVES
+        else []
+    )
 
 
 def _component(var, l_lat, l_lon, l_time):
@@ -131,6 +138,16 @@ def fit_with_rebasis(y, coords, ndays, lat_range, n_sub=1500):
             lon=rb.CovarianceDim("exponential", 60.0, period=360.0),
             time=rb.CovarianceDim("matern32", 5.0),
         )
+        if TWO_SCALE_PROFILE:
+            # plus a large-scale, persistent longitudinal component with its own latitude
+            # profile (e.g. a displaced polar vortex)
+            big = rb.VarianceProfile(basis, np.full(len(basis), 0.5 * np.sqrt(v)))
+            start = start + rb.Covariance(
+                1.0,
+                lat=rb.CovarianceDim("squared_exponential", 15.0, variance_profile=big),
+                lon=rb.CovarianceDim("matern52", 150.0, period=360.0),
+                time=rb.CovarianceDim("matern32", 10.0),
+            )
     return rb.fit_covariance(
         y,
         coords,
@@ -190,6 +207,17 @@ def main():
         help="with --fit-prior: a fitted variance profile in latitude",
     )
     ap.add_argument(
+        "--two-scale-profile",
+        action="store_true",
+        help="with --lat-profile: add a large-scale longitudinal component with its own profile",
+    )
+    ap.add_argument(
+        "--waves",
+        type=int,
+        default=0,
+        help="with --fit-prior: zonal waves 1..N in the mean, with a fitted prior",
+    )
+    ap.add_argument(
         "--drift-prior",
         type=float,
         default=None,
@@ -208,11 +236,13 @@ def main():
         "with its own fitted covariance (0: one global fit)",
     )
     args = ap.parse_args()
-    global LAT_KNOT_SPACING, TWO_SCALE, DRIFT_PRIOR, LAT_PROFILE
+    global LAT_KNOT_SPACING, TWO_SCALE, DRIFT_PRIOR, LAT_PROFILE, WAVES, TWO_SCALE_PROFILE
     LAT_KNOT_SPACING = args.knots
     TWO_SCALE = args.two_scale
     DRIFT_PRIOR = args.drift_prior
     LAT_PROFILE = args.lat_profile
+    WAVES = args.waves
+    TWO_SCALE_PROFILE = args.two_scale_profile
     out = Path(args.out)
     out.mkdir(exist_ok=True)
     ndays = days_in_month(args.year, args.month)
@@ -243,13 +273,24 @@ def main():
         fit = fit_with_rebasis(y, coords, ndays, coverage(lat))
         cov_model, noise, mean_model = fit.covariance, fit.nugget, fit.mean
         p = fit.parameters
+        lengths = ", ".join(f"{k} {v:.1f}" for k, v in p.items() if "length" in k)
         print(
             f"fitted with rebasis in {time.perf_counter() - t0:.0f}s ({fit.n_iterations} "
-            f"iterations): σ {np.sqrt(p['variance']):.3f} (lat {p['length.lat']:.1f}°, lon "
-            f"{p['length.lon']:.0f}°, t {p['length.time']:.1f} d), drift prior "
-            f"{p['mean.1.prior_std']:.3f}, nugget σ {np.sqrt(fit.nugget):.3f}"
+            f"iterations): {lengths}; drift prior {p['mean.1.prior_std']:.3f}, nugget σ "
+            f"{np.sqrt(fit.nugget):.3f}"
         )
-        if LAT_PROFILE:
+        if WAVES:
+            print(f"  fitted wave prior {p['mean.2.prior_std']:.3f}")
+        if LAT_PROFILE and TWO_SCALE_PROFILE:
+            grid = np.arange(-75.0, 80.0, 15.0)
+            grid = grid[(grid >= coverage(lat)[0]) & (grid <= coverage(lat)[1])]
+            for name, comp in zip(("small", "large"), fit.covariance.components, strict=True):
+                sp = comp.dims["lat"].variance_profile
+                print(
+                    f"  {name}-scale σ(lat): "
+                    + ", ".join(f"{g:.0f}°: {v:.2f}" for g, v in zip(grid, sp(grid), strict=True))
+                )
+        elif LAT_PROFILE:
             s = fit.covariance.dims["lat"].variance_profile
             grid = np.arange(-75.0, 80.0, 15.0)
             grid = grid[(grid >= coverage(lat)[0]) & (grid <= coverage(lat)[1])]
@@ -302,7 +343,9 @@ def main():
         f"{np.sum(np.abs(g - truth) < 2 * s)}/{np.sum(covered)} covered bands"
     )
     model = (
-        "lat_profile"
+        f"waves{WAVES}"
+        if WAVES
+        else "lat_profile"
         if LAT_PROFILE
         else "fitted_prior"
         if args.fit_prior

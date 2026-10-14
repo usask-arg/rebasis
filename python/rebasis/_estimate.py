@@ -368,6 +368,12 @@ class Estimate:
         return out.reshape(*grid, self.weights.shape[0], nb)
 
 
+def _logdet_spd(a: np.ndarray) -> float:
+    """log|A| of a symmetric positive-definite matrix, by Cholesky (numpy's slogdet can emit
+    spurious floating-point warnings with some LAPACK builds)."""
+    return 2.0 * float(np.sum(np.log(np.diag(linalg.cholesky(a, lower=True)))))
+
+
 def _factor(q: np.ndarray):
     try:
         return linalg.cho_factor(q, lower=True, check_finite=False)
@@ -412,7 +418,7 @@ def _solve(y, q, hf, known, b=None, hf_t=None, prior_var=None, prior_cov=None, w
         logdet_s = 2.0 * np.sum(np.log(np.diag(s_cf[0])))
         # ½ log|HᵀH| makes the restricted likelihood independent of how the unconstrained mean
         # is parametrized (Harville 1974)
-        logdet_hh = np.linalg.slogdet(hf.T @ hf)[1]
+        logdet_hh = _logdet_spd(hf.T @ hf)
         ll += -0.5 * logdet_s + 0.5 * logdet_hh - 0.5 * (n - pf) * math.log(2 * math.pi)
     else:
         ll += -0.5 * n * math.log(2 * math.pi)

@@ -18,6 +18,7 @@ from ._estimate import (
     MeanTerm,
     VarianceProfile,
     _kernels,
+    _logdet_spd,
     _mean_design,
     _observation_atoms,
     _parse_mean,
@@ -255,7 +256,7 @@ def fit_covariance(
                 -0.5 * y @ alpha
                 - 0.5 * logdet
                 - np.sum(np.log(np.diag(s_cf[0])))
-                + 0.5 * np.linalg.slogdet(hf.T @ hf)[1]
+                + 0.5 * _logdet_spd(hf.T @ hf)
                 - 0.5 * (n - p_f) * math.log(2 * math.pi)
             )
         else:

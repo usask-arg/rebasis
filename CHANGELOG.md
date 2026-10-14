@@ -18,6 +18,8 @@
 - `VarianceProfile`: a spline standard deviation along a covariance dimension (non-stationary
   variance), with exact covariances and exact gradients for fitting its coefficients;
   `Element::linear_combination` and three-factor inner products in Rust.
+- `Space.harmonics` (cos/sin of a period, e.g. zonal waves) and `Space.bsplines_periodic`
+  (B-splines that wrap around a period), exact in every integral, for periodic mean structure.
 
 ## 0.1.0
 

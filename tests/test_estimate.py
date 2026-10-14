@@ -473,3 +473,54 @@ def test_neighborhood_errors():
         _single(Y, neighborhood={"x": 1.0}, full_covariance=True)
     with pytest.raises(ValueError, match="unknown"):
         _single(Y, neighborhood={"z": 1.0})
+
+
+# ------------------------------------------------------------------- periodic mean bases
+
+
+def test_zonal_mean_from_one_longitude_sector_with_a_wave_mean():
+    # a latitude structure plus waves 1 and 2 with latitude-dependent amplitudes, sampled only in
+    # 200-300°E: with the waves in the mean (and the field in its span), the area-weighted zonal
+    # means are recovered exactly from that one sector
+    rng = np.random.default_rng(4)
+    n = 300
+    lat = rng.uniform(-60, 60, n)
+    lon = rng.uniform(200, 300, n)
+    lat_b = rb.Space.bsplines_clamped(np.linspace(-60, 60, 5), 3)
+    waves = rb.Space.harmonics(2, 360.0)
+    c0 = rng.uniform(1, 3, len(lat_b))  # the zonal-mean structure
+    c1 = rng.normal(0, 0.5, (len(lat_b), len(waves)))  # wave amplitudes by latitude
+    bl = lat_b.evaluate(lat).toarray()
+    bw = waves.evaluate(lon).toarray()
+    y = bl @ c0 + np.einsum("ni,ij,nj->n", bl, c1, bw)
+    cov = rb.Covariance(
+        0.01,
+        lat=rb.CovarianceDim("squared_exponential", 10.0),
+        lon=rb.CovarianceDim("exponential", 30.0, period=360.0),
+    )
+    edges = [-40.0, -20.0, 20.0]
+    est = rb.optimal_estimate(
+        y,
+        {"lat": lat, "lon": lon},
+        {"lat": rb.Space.boxes(edges), "lon": rb.Space.boxes([0, 360])},
+        cov,
+        noise=1e-8,
+        target_weight={"lat": "cos_lat_deg"},
+        mean=[rb.MeanTerm({"lat": lat_b}), rb.MeanTerm({"lat": lat_b, "lon": waves})],
+    )
+    truth = rb.measure(rb.Space.boxes(edges), lat_b, weight="cos_lat_deg") @ c0
+    np.testing.assert_allclose(est.values[:, 0], truth, atol=1e-9)
+    naive = [y[(lat >= a) & (lat < b)].mean() for a, b in [(-40, -20), (-20, 20)]]
+    assert np.max(np.abs(np.array(naive) - truth)) > 0.05  # the sector alone is biased
+
+
+def test_periodic_bsplines_in_python():
+    s = rb.Space.bsplines_periodic(np.linspace(0, 360, 9), 3)
+    assert len(s) == 8
+    x = np.linspace(0, 359.9, 500)
+    np.testing.assert_allclose(s.evaluate(x).toarray().sum(axis=1), 1.0, atol=1e-13)
+    h = rb.Space.harmonics(3)
+    assert len(h) == 6
+    np.testing.assert_allclose(
+        h.evaluate([90.0]).toarray().ravel(), [0, 1, -1, 0, 0, -1], atol=1e-14
+    )
