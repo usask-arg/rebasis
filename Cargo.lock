@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "rebasis"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libm",
  "ndarray 0.16.1",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "rebasis-py"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "ndarray 0.16.1",
  "numpy",

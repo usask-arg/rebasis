@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
 
-First development version.
+First release.
 
 - Spaces of boxes, hats, B-splines (degree 0-3), deltas, and line-shape profiles: Gaussian,
   Lorentzian, Voigt, pseudo-Voigt, super-Gaussian (optionally asymmetric), smoothed box, FTS line
