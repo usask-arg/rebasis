@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - `Csr::apply_axis` and `Csr::apply_transpose_axis`: apply a matrix or its transpose along any
   axis of an n-dimensional `ndarray` array, e.g. the wavelength axis of sasktran2 radiances and
