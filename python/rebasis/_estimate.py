@@ -298,6 +298,9 @@ class Estimate:
     observations (zero weight on invalid ones). Row m is target m's averaging kernel over the
     observations; it sums to 1 when the mean has an unconstrained constant."""
     offset: np.ndarray | None = None
+    n_used: np.ndarray | None = None
+    """The number of (valid) observations each estimate used: all valid ones, or those in its
+    neighbourhood."""
 
     def apply(self, values) -> np.ndarray:
         """The same estimator applied to other values at the same observations (shape (n,) or
@@ -462,6 +465,61 @@ def log_likelihood(values, coords: Mapping, covariance: Covariance, *, noise, me
     return float(ll[0]) if single else ll
 
 
+def _take(atoms: _Atoms, idx: np.ndarray) -> _Atoms:
+    sel = idx.tolist()
+    return _Atoms([s.take(sel) for s in atoms.spaces], atoms.weights, (len(idx),))
+
+
+def _period(covariance, name: str) -> float | None:
+    comps = covariance.components if isinstance(covariance, CovarianceSum) else [covariance]
+    periods = {c.dims[name].period for c in comps} - {None}
+    if len(periods) > 1:
+        msg = f"the components disagree on the period of {name!r}"
+        raise ValueError(msg)
+    return periods.pop() if periods else None
+
+
+def _overlaps(lo, hi, w_lo, w_hi, period):
+    """Whether the intervals [lo, hi] (arrays) reach the window [w_lo, w_hi], with wrap-around."""
+    if period is None:
+        return (lo <= w_hi) & (hi >= w_lo)
+    if w_hi - w_lo >= period:
+        return np.ones(lo.shape, bool)
+    j0 = np.round((0.5 * (w_lo + w_hi) - 0.5 * (lo + hi)) / period)
+    out = np.zeros(lo.shape, bool)
+    for dj in (-1, 0, 1):
+        s = (j0 + dj) * period
+        out |= (lo + s <= w_hi) & (hi + s >= w_lo)
+    return out
+
+
+def _blocks(neighborhood, names, targets, tgt: _Atoms, kernels, covariance):
+    """(target indices, observation indices) per block of targets sharing a neighbourhood."""
+    unknown = set(neighborhood) - set(names)
+    if unknown:
+        msg = f"neighborhood for unknown dimensions {sorted(unknown)}"
+        raise ValueError(msg)
+    if any(not (w >= 0) for w in neighborhood.values()):
+        msg = "neighborhood half widths must be >= 0"
+        raise ValueError(msg)
+    dims = [d for d, name in enumerate(names) if name in neighborhood]
+    grid_idx = np.unravel_index(np.arange(tgt.size), tgt.shape)
+    keys = np.stack([grid_idx[d] for d in dims], axis=1)
+    out = []
+    for key in np.unique(keys, axis=0):
+        t_idx = np.flatnonzero(np.all(keys == key, axis=1))
+        mask = np.ones(len(kernels[names[0]]), bool)
+        for d, i in zip(dims, key, strict=True):
+            name = names[d]
+            half = float(neighborhood[name])
+            w_lo = targets[name].lower[i] - half
+            w_hi = targets[name].upper[i] + half
+            k = kernels[name]
+            mask &= _overlaps(k.lower, k.upper, w_lo, w_hi, _period(covariance, name))
+        out.append((t_idx, np.flatnonzero(mask)))
+    return out
+
+
 def optimal_estimate(
     values,
     coords: Mapping,
@@ -473,6 +531,7 @@ def optimal_estimate(
     target_weight: Mapping | None = None,
     weights: bool = True,
     full_covariance: bool = False,
+    neighborhood: Mapping[str, float] | None = None,
 ) -> Estimate:
     """Optimal (kriging) estimates of grid averages from irregular observations.
 
@@ -505,6 +564,16 @@ def optimal_estimate(
         Per dimension, a weight for the target averages, e.g. ``{"lat": "cos_lat_deg"}``.
     weights, full_covariance
         Also return the weights and the posterior covariance of the targets.
+    neighborhood
+        Estimate locally: dimension name -> half width. Targets are grouped into blocks by
+        their elements along these dimensions (e.g. ``{"lat": 20, "time": 15}`` makes each
+        latitude band × month a block), and each block uses only the observations whose
+        support lies within the half width of its targets (periodic dimensions wrap). The
+        cost then grows with the size of a neighbourhood, not of the whole data set. Mean
+        bases that vanish on a block's observations and targets are dropped there, so a
+        global basis can be given; a block without observations is NaN. Not available with
+        ``full_covariance``; the log likelihood and mean coefficients, which differ per block,
+        are NaN and None.
 
     Notes
     -----
@@ -520,61 +589,94 @@ def optimal_estimate(
     tgt = _grid_atoms(targets, names, target_weight)
     m = tgt.size
     terms, known = _parse_mean(mean)
-    h, h_t, sd = _mean_design(terms, names, _kernels(coords, names), n, targets, target_weight)
+    kernels = _kernels(coords, names)
+    h, h_t, sd = _mean_design(terms, names, kernels, n, targets, target_weight)
     flat = np.isinf(sd)
-    # finite-prior mean terms are part of the covariance: Σ_p = diag(sd²)
-    hp, hp_t = h[:, ~flat] * sd[~flat], h_t[:, ~flat] * sd[~flat]
-
-    q0 = covariance.matrix(obs, obs, symmetric=True)
-    b0 = covariance.matrix(tgt, obs) + hp_t @ hp.T
-    if full_covariance:
-        prior_cov = covariance.matrix(tgt, tgt, symmetric=True) + hp_t @ hp_t.T
-        prior_var = np.diag(prior_cov).copy()
-    else:
-        prior_cov = None
-        prior_var = covariance.diagonal(tgt) + np.einsum("mp,mp->m", hp_t, hp_t)
-
-    g = np.empty((m, k))
-    var = np.empty((m, k))
-    ll = np.empty(k)
     pf = int(flat.sum())
+    local = bool(neighborhood)
+    if local and full_covariance:
+        msg = "full_covariance is not available with a neighborhood"
+        raise ValueError(msg)
+    blocks = (
+        _blocks(neighborhood, names, targets, tgt, kernels, covariance)
+        if local
+        else [(np.arange(m), np.arange(n))]
+    )
+
+    g = np.full((m, k), np.nan)
+    var = np.full((m, k), np.nan)
+    used = np.zeros((m, k), dtype=int)
+    ll = np.full(k, np.nan)
     beta = np.full((pf, k), np.nan)
     one_group = len(groups) == 1
     cov_out = np.empty((m, m) if one_group else (k, m, m)) if full_covariance else None
     w_out = np.zeros((m, n) if one_group else (k, m, n)) if weights else None
-    off_out = np.empty(m if one_group else (k, m)) if weights else None
-    for cols in groups:
-        idx = valid[:, cols[0]]
-        q = q0[np.ix_(idx, idx)] + np.diag(nz[idx, cols[0]]) + hp[idx] @ hp[idx].T
-        r = _solve(
-            y[np.ix_(idx, cols)],
-            q,
-            h[idx][:, flat],
-            known,
-            b=b0[:, idx],
-            hf_t=h_t[:, flat],
-            prior_var=prior_var,
-            prior_cov=prior_cov,
-            weights=weights,
+    off_out = np.full(m if one_group else (k, m), np.nan) if weights else None
+    prior_all = np.full(m, np.nan)
+
+    for t_idx, o_idx in blocks:
+        whole = len(t_idx) == m and len(o_idx) == n
+        obs_b = obs if whole else _take(obs, o_idx)
+        tgt_b = tgt if whole else _take(tgt, t_idx)
+        hb, hb_t = h[o_idx], h_t[t_idx]
+        cols_b = (
+            np.ones(len(sd), bool)
+            if not local
+            else np.any(hb != 0, axis=0) | np.any(hb_t != 0, axis=0)
         )
-        g[:, cols] = r["g"]
-        var[:, cols] = r["var"][:, None]
-        ll[cols] = r["ll"]
-        if pf:
-            beta[:, cols] = r["beta"]
-        if one_group:
-            if full_covariance:
-                cov_out[:] = r["cov"]
-            if weights:
-                w_out[:, idx] = r["w"]
-                off_out[:] = r["offset"]
+        fl = flat & cols_b
+        pr = ~flat & cols_b
+        # finite-prior mean terms are part of the covariance: Σ_p = diag(sd²)
+        hp, hp_t = hb[:, pr] * sd[pr], hb_t[:, pr] * sd[pr]
+
+        q0 = covariance.matrix(obs_b, obs_b, symmetric=True) if len(o_idx) else None
+        b0 = covariance.matrix(tgt_b, obs_b) + hp_t @ hp.T if len(o_idx) else None
+        if full_covariance:
+            prior_cov = covariance.matrix(tgt_b, tgt_b, symmetric=True) + hp_t @ hp_t.T
+            prior_var = np.diag(prior_cov).copy()
         else:
-            for j in cols:
+            prior_cov = None
+            prior_var = covariance.diagonal(tgt_b) + np.einsum("mp,mp->m", hp_t, hp_t)
+        prior_all[t_idx] = prior_var
+
+        for cols in groups:
+            idx = valid[o_idx, cols[0]]
+            used[np.ix_(t_idx, cols)] = idx.sum()
+            if not idx.any():
+                continue  # no observations: NaN
+            obs_rows = o_idx[idx]
+            q = q0[np.ix_(idx, idx)] + np.diag(nz[obs_rows, cols[0]]) + hp[idx] @ hp[idx].T
+            r = _solve(
+                y[np.ix_(obs_rows, cols)],
+                q,
+                hb[idx][:, fl],
+                known,
+                b=b0[:, idx],
+                hf_t=hb_t[:, fl],
+                prior_var=prior_var,
+                prior_cov=prior_cov,
+                weights=weights,
+            )
+            g[np.ix_(t_idx, cols)] = r["g"]
+            var[np.ix_(t_idx, cols)] = r["var"][:, None]
+            if not local:
+                ll[cols] = r["ll"]
+                if pf:
+                    beta[:, cols] = r["beta"]
+            if one_group:
                 if full_covariance:
-                    cov_out[j] = r["cov"]
+                    cov_out[:] = r["cov"]
                 if weights:
-                    w_out[j][:, idx] = r["w"]
-                    off_out[j] = r["offset"]
+                    w_out[np.ix_(t_idx, obs_rows)] = r["w"]
+                    off_out[t_idx] = r["offset"]
+            else:
+                for j in cols:
+                    if full_covariance:
+                        cov_out[j] = r["cov"]
+                    if weights:
+                        w_out[j][np.ix_(t_idx, obs_rows)] = r["w"]
+                        off_out[j][t_idx] = r["offset"]
+    prior_var = prior_all
 
     def shaped(a):
         a = a.reshape(*tgt.shape, k)
@@ -583,7 +685,7 @@ def optimal_estimate(
     is_constant = len(terms) == 1 and not terms[0].bases and pf == 1
     if known is not None:
         mean_out = known
-    elif is_constant:
+    elif is_constant and not local:
         mean_out = float(beta[0, 0]) if single else beta[0]
     else:
         mean_out = float("nan")
@@ -594,8 +696,9 @@ def optimal_estimate(
         mean=mean_out,
         log_likelihood=float(ll[0]) if single else ll,
         dims=names,
-        mean_coefficients=None if pf == 0 else (beta[:, 0] if single else beta),
+        mean_coefficients=None if pf == 0 or local else (beta[:, 0] if single else beta),
         covariance=cov_out,
         weights=w_out,
         offset=off_out,
+        n_used=shaped(used),
     )

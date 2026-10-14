@@ -175,8 +175,15 @@ for length in [2.0, 6.0, 15.0]:
     print(f"time correlation length {length:5.1f} days: log likelihood {ll:10.1f}")
 ```
 
-## Cost
+## Cost and neighbourhoods
 
 The n × n observation covariance is formed in Rust and factored with LAPACK (O(n³)); the
 posterior variances need one solve per target. This example ({math}`n \approx 13\,000`) takes a
-few seconds; for much larger problems estimate month by month or band by band.
+few seconds.
+
+For more data, estimate locally: `neighborhood={"lat": 10, "time": 5}` groups the targets into
+blocks (here each latitude band × month) and estimates each block from the observations within
+10° of latitude and 5 days of its targets. The cost then grows with the neighbourhood, not the
+data set: a year of 50 000 observations, as monthly 10° zonal means, takes a few seconds. Choose
+half widths of a few correlation lengths, beyond which observations carry little weight;
+`n_used` reports how many observations each estimate drew on.

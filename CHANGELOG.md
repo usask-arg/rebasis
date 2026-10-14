@@ -10,6 +10,8 @@
 - Estimation: `values` with k columns (shared covariance; one factorization per group of
   columns with the same valid observations), `MeanTerm` for mean terms with Gaussian priors,
   and `CovarianceSum` (`Covariance + Covariance`) for multi-scale priors.
+- Estimation: `neighborhood=` estimates blocks of targets from the observations near them (with
+  periodic wrap), for data sets far beyond a single dense solve; `Estimate.n_used`.
 
 ## 0.1.0
 

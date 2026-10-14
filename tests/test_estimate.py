@@ -392,3 +392,84 @@ def test_prior_makes_bases_without_data_usable():
         _single(Y, mean={"x": xb})
     est = _single(Y, mean=[rb.MeanTerm({}), rb.MeanTerm({"x": xb}, prior_std=1.0)])
     assert np.all(np.isfinite(est.values)) and np.all(est.std > 0)
+
+
+# ------------------------------------------------------------------------- neighbourhoods
+
+
+def test_neighborhood_covering_everything_is_the_global_estimate():
+    glob = _single(Y)
+    loc = _single(Y, neighborhood={"x": 100.0, "t": 100.0})
+    np.testing.assert_allclose(loc.values, glob.values, rtol=1e-12)
+    np.testing.assert_allclose(loc.std, glob.std, rtol=1e-12)
+    np.testing.assert_allclose(loc.weights, glob.weights, atol=1e-14)
+    assert np.all(loc.n_used == N) and np.isnan(loc.log_likelihood)
+
+
+def test_each_block_is_the_estimate_from_its_own_observations():
+    half = 0.8
+    edges = np.array([0.0, 1.5, 3.0, 5.0])
+    loc = _single(Y, neighborhood={"x": half})
+    for i, (a, b) in enumerate(itertools.pairwise(edges)):
+        keep = (OBS_X >= a - half) & (OBS_X <= b + half)
+        ref = rb.optimal_estimate(
+            Y[keep],
+            {"x": OBS_X[keep], "t": OBS_T[keep]},
+            {"x": rb.Space.boxes([a, b]), "t": TARGETS["t"]},
+            COV,
+            noise=0.05**2,
+        )
+        np.testing.assert_allclose(loc.values[i], ref.values[0], rtol=1e-12)
+        np.testing.assert_allclose(loc.std[i], ref.std[0], rtol=1e-12)
+        assert np.all(loc.n_used[i] == keep.sum())
+        rows = np.ravel_multi_index((np.full(2, i), np.arange(2)), (3, 2))
+        np.testing.assert_allclose(loc.weights[rows][:, keep], ref.weights, atol=1e-14)
+        assert np.all(loc.weights[rows][:, ~keep] == 0)
+    np.testing.assert_allclose(loc.apply(Y), loc.values, rtol=1e-12)
+
+
+def test_periodic_neighborhood_wraps():
+    lon = np.array([2.0, 5.0, 120.0, 200.0, 355.0])
+    cov = rb.Covariance(1.0, lon=rb.CovarianceDim("exponential", 30.0, period=360.0))
+    est = rb.optimal_estimate(
+        np.arange(5.0),
+        {"lon": lon},
+        {"lon": rb.Space.boxes([340.0, 360.0, 380.0])},
+        cov,
+        noise=0.01,
+        neighborhood={"lon": 10.0},
+    )
+    # [330, 370] reaches 2, 5 (as 362, 365) and 355; [350, 390] the same three
+    np.testing.assert_array_equal(est.n_used, [3, 3])
+
+
+def test_empty_blocks_are_nan():
+    est = _single(Y, neighborhood={"t": 0.0}, mean="estimate")
+    assert np.all(est.n_used > 0)
+    far = rb.optimal_estimate(
+        Y,
+        {"x": OBS_X, "t": OBS_T},
+        {"x": rb.Space.boxes([0.0, 5.0]), "t": rb.Space.boxes([0.0, 10.0, 50.0, 60.0])},
+        COV,
+        noise=0.05**2,
+        neighborhood={"t": 1.0},
+    )
+    assert np.isfinite(far.values[0, 0]) and np.isnan(far.values[0, 2])
+    assert far.n_used[0, 2] == 0
+
+
+def test_global_basis_is_trimmed_per_block():
+    # splines over [0, 20]: globally the functions beyond the data are undetermined
+    xb = rb.Space.bsplines_clamped(np.linspace(0, 20, 21), 3)
+    with pytest.raises(rb.SingularError):
+        _single(Y, mean={"x": xb})
+    est = _single(Y, mean={"x": xb}, neighborhood={"x": 0.5})
+    assert np.all(np.isfinite(est.values))
+    assert est.mean_coefficients is None
+
+
+def test_neighborhood_errors():
+    with pytest.raises(ValueError, match="full_covariance"):
+        _single(Y, neighborhood={"x": 1.0}, full_covariance=True)
+    with pytest.raises(ValueError, match="unknown"):
+        _single(Y, neighborhood={"z": 1.0})
