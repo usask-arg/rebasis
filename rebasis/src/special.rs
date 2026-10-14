@@ -8,7 +8,7 @@ const WEIDEMAN_N: usize = 40;
 
 struct Weideman {
     l: f64,
-    /// p(Z) = Σ a[n] Z^n
+    /// `p(Z) = Σ a[n] Z^n`
     a: Vec<f64>,
 }
 

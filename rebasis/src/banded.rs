@@ -9,7 +9,7 @@ pub struct BandedCholesky {
     n: usize,
     /// Half bandwidth.
     p: usize,
-    /// Row i holds L[i, i-p..=i] at l[i*(p+1)..(i+1)*(p+1)], left-padded for i < p.
+    /// Row i holds `L[i, i-p..=i]` at `l[i*(p+1)..(i+1)*(p+1)]`, left-padded for i < p.
     l: Vec<f64>,
 }
 

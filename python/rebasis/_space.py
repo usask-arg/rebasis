@@ -157,7 +157,7 @@ class Space:
         asymmetry=0.0,
         cutoff: float = 6.0,
     ) -> Space:
-        """exp(−ln2 · |t / w|^power), flat-topped for power > 2 (power >= 1).
+        """``exp(−ln2 · |t / w|^power)``, flat-topped for power > 2 (power >= 1).
 
         With ``asymmetry`` a, the half widths are w(1 − a) left and w(1 + a) right of the
         center (the FWHM stays 2w), as used for e.g. TROPOMI slit functions. ``cutoff`` in
@@ -285,7 +285,7 @@ class Space:
         ``jacobian`` decides how values carry over; there is no default because it is a
         physical choice:
 
-        - ``True`` multiplies by |dλ/dν|, so that integrals over ν equal integrals over λ. Use
+        - ``True`` multiplies by ``|dλ/dν|``, so that integrals over ν equal integrals over λ. Use
           it for **kernels** (an instrument response given in wavelength averages over
           wavelength, wherever the spectrum is computed) and for bases of **spectral
           densities** (radiance per nm).

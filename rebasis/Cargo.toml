@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/rebasis"
+keywords = ["spectroscopy", "regridding", "instrument-function", "remote-sensing", "projection"]
+categories = ["science", "mathematics"]
 
 [dependencies]
 libm = "0.2"

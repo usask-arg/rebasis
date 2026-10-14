@@ -3,11 +3,12 @@ requires = ["maturin>=1.9.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rebasis"
+name = "pyrebasis"
 dynamic = ["version"]
 description = "Linear maps between function bases: instrument line shapes, regridding, projection"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26", "scipy>=1.11"]
 classifiers = [
@@ -20,10 +21,30 @@ classifiers = [
 
 [project.optional-dependencies]
 xarray = ["xarray>=2024.7"]
-test = ["pytest>=8"]
+test = ["pytest>=8", "xarray>=2024.7"]
+docs = [
+    "sphinx>=8",
+    "furo>=2024.8",
+    "myst-nb>=1.1",
+    "numpydoc>=1.8",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "xarray>=2024.7",
+]
+
+[project.urls]
+Documentation = "https://usask-arg.github.io/rebasis/"
+Repository = "https://github.com/usask-arg/rebasis"
 
 [dependency-groups]
-dev = ["maturin>=1.9.4,<2.0", "pytest>=8", "ruff>=0.8", "matplotlib>=3.8", "xarray>=2024.7"]
+dev = [
+    "maturin>=1.9.4,<2.0",
+    "pytest>=8",
+    "ruff>=0.8",
+    "matplotlib>=3.8",
+    "xarray>=2024.7",
+    "pre-commit>=4",
+]
 
 [tool.uv]
 # Rebuild the editable extension whenever the Rust sources change.
@@ -49,6 +70,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["docs/_build", "docs/jupyter_execute"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "NPY", "RUF"]

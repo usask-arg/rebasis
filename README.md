@@ -1,6 +1,17 @@
 # rebasis
 
+[![CI](https://github.com/usask-arg/rebasis/actions/workflows/ci.yml/badge.svg)](https://github.com/usask-arg/rebasis/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-usask--arg.github.io%2Frebasis-blue)](https://usask-arg.github.io/rebasis/)
+
 Linear maps between function bases, with a Rust core and a Python interface.
+
+```bash
+pip install pyrebasis        # import rebasis
+cargo add rebasis            # the Rust crate
+```
+
+The PyPI distribution is `pyrebasis` because `rebasis` there is an unrelated project; the import
+name is `rebasis`. Documentation: <https://usask-arg.github.io/rebasis/>.
 
 A quantity is represented as f(x) = Σ_j f_j B_j(x). rebasis computes the sparse matrices that
 turn the coefficients f_j into:
@@ -20,15 +31,15 @@ parameters.
 import numpy as np
 import rebasis as rb
 
-wavel = np.linspace(300, 310, 100_001)         # high-resolution model grid
-hires = rb.Space.hats(wavel)                   # radiance = linear interpolant of the samples
+wavel = np.linspace(300, 310, 100_001)  # high-resolution model grid
+hires = rb.Space.hats(wavel)  # radiance = linear interpolant of the samples
 ils = rb.Space.voigts(np.arange(301, 309, 0.1), fwhm_gaussian=0.4, fwhm_lorentzian=0.05)
 
-W = rb.measure(ils, hires)                     # scipy.sparse.csr_array, (80, 100001)
-measured = W @ radiance                        # or rb.apply_along(W, radiance, axis=...)
+W = rb.measure(ils, hires)  # scipy.sparse.csr_array, (80, 100001)
+measured = W @ radiance  # or rb.apply_along(W, radiance, axis=...)
 
 coarse = rb.Space.boxes(np.arange(300, 310.01, 0.5))
-binned = rb.regrid(radiance, hires, coarse)    # conservative; bounded=True to avoid overshoot
+binned = rb.regrid(radiance, hires, coarse)  # conservative; bounded=True to avoid overshoot
 ```
 
 ## Spaces
@@ -103,12 +114,20 @@ of the finite differences.
 | `power`, `asymmetry` | super-Gaussian |
 | `half_width` | smoothed box |
 
+## Wavelength and wavenumber
+
+`space.to_wavenumber(jacobian=...)` (and `to_wavelength`, `reciprocal`, `affine`) uses each
+element exactly in another coordinate, e.g. an instrument response in nm against a model grid in
+cm⁻¹: `rb.measure(ils_nm.to_wavenumber(jacobian=True), hires_cminv)`. The required `jacobian` is
+`True` for kernels and spectral densities, `False` for plain functions.
+
 ## Development
 
 ```bash
 uv sync            # builds the extension (release profile)
 uv run pytest
 cargo test -p rebasis
+uv run --extra docs sphinx-build -W -b html docs docs/_build/html
 ```
 
 The Rust crate `rebasis` (in `rebasis/`) has no Python dependency and is intended to be used

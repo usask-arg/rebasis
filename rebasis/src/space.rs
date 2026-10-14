@@ -141,7 +141,7 @@ impl Space {
         ))
     }
 
-    /// Piecewise-constant basis: box i covers [edges[i], edges[i+1]).
+    /// Piecewise-constant basis: box i covers `[edges[i], edges[i+1])`.
     pub fn boxes(edges: &[f64]) -> Result<Self> {
         check_increasing("edges", edges, 2)?;
         Ok(Space::new(
@@ -170,7 +170,7 @@ impl Space {
     }
 
     /// B-splines of `degree` (0..=3) on the nondecreasing knot vector `knots`: len(knots) −
-    /// degree − 1 functions, function i supported on [knots[i], knots[i + degree + 1]].
+    /// degree − 1 functions, function i supported on `[knots[i], knots[i + degree + 1]]`.
     pub fn bsplines(knots: &[f64], degree: usize) -> Result<Self> {
         if degree > 3 {
             return invalid(format!("B-spline degree must be 0..=3, got {degree}"));
@@ -229,7 +229,7 @@ impl Space {
     }
 
     /// B-splines of `degree` with the end breakpoints repeated: len(breakpoints) + degree − 1
-    /// functions forming a partition of unity on [breakpoints[0], breakpoints[-1]]. Degree 0
+    /// functions forming a partition of unity on `[breakpoints[0], breakpoints[-1]]`. Degree 0
     /// gives boxes and degree 1 hats.
     pub fn bsplines_clamped(breakpoints: &[f64], degree: usize) -> Result<Self> {
         check_increasing("breakpoints", breakpoints, 2)?;
@@ -311,7 +311,7 @@ impl Space {
         ))
     }
 
-    /// Copies of one shape, element i being shape((x − centers[i]) / stretch[i]).
+    /// Copies of one shape, element i being `shape((x − centers[i]) / stretch[i])`.
     pub fn shifted(shape: Shape, centers: &[f64], stretch: &[f64]) -> Result<Self> {
         let stretch = broadcast("stretch", stretch, centers.len())?;
         let shape = Arc::new(shape);
@@ -325,7 +325,7 @@ impl Space {
     }
 
     /// A separately tabulated shape per element: element i is the interpolant of
-    /// (x[i], y[i]) as a function of the offset from centers[i].
+    /// `(x[i], y[i])` as a function of the offset from `centers[i]`.
     pub fn tabulated(
         centers: &[f64],
         x: &[Vec<f64>],

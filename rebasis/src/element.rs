@@ -82,7 +82,7 @@ impl Shape {
         Ok(Shape { segments })
     }
 
-    /// The piecewise-linear interpolant of (x, y), zero outside [x[0], x[-1]].
+    /// The piecewise-linear interpolant of (x, y), zero outside `[x[0], x[-1]]`.
     pub fn piecewise_linear(x: &[f64], y: &[f64]) -> Result<Self> {
         check_table(x, y)?;
         let segments = x
@@ -98,7 +98,7 @@ impl Shape {
     }
 
     /// The monotone piecewise-cubic Hermite (PCHIP, Fritsch–Carlson) interpolant of (x, y),
-    /// zero outside [x[0], x[-1]]. Smooth (C¹) and free of overshoot, with the same slopes as
+    /// zero outside `[x[0], x[-1]]`. Smooth (C¹) and free of overshoot, with the same slopes as
     /// `scipy.interpolate.PchipInterpolator`.
     pub fn pchip(x: &[f64], y: &[f64]) -> Result<Self> {
         check_table(x, y)?;
