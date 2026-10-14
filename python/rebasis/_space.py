@@ -330,6 +330,15 @@ class Space:
 
     # ------------------------------------------------------------- utilities
 
+    @classmethod
+    def concatenate(cls, spaces) -> Space:
+        """The elements of ``spaces`` one after another, e.g. kernels of a different shape for
+        each channel."""
+        spaces = list(spaces)
+        kinds = {s.kind for s in spaces}
+        kind = kinds.pop() if len(kinds) == 1 else "mixed"
+        return cls(_rebasis.Space.concatenate([s._inner for s in spaces]), kind)
+
     def take(self, indices) -> Space:
         """The elements at ``indices`` (repeats allowed), in that order."""
         idx = [int(i) for i in np.asarray(indices).ravel()]

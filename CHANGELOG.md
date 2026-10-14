@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `Csr::apply_axis` and `Csr::apply_transpose_axis`: apply a matrix or its transpose along any
+  axis of an n-dimensional `ndarray` array, e.g. the wavelength axis of sasktran2 radiances and
+  their derivatives. `apply` and `apply_last_axis` no longer copy contiguous inputs.
+- `Space.concatenate` (`Space::concatenate` in Rust): one space from kernels of different
+  shapes, e.g. a different line shape per channel.
+
 ## 0.2.0
 
 Estimation: optimal (kriging) estimates of averages from sparse, irregular samples, with

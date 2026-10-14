@@ -401,6 +401,14 @@ impl PySpace {
         space(self.inner.mapped(map, jacobian))
     }
 
+    #[staticmethod]
+    fn concatenate(spaces: Vec<PyRef<'_, PySpace>>) -> Self {
+        let inner: Vec<&rebasis::Space> = spaces.iter().map(|s| &s.inner).collect();
+        PySpace {
+            inner: rebasis::Space::concatenate(&inner),
+        }
+    }
+
     fn take(&self, indices: Vec<usize>) -> PyResult<Self> {
         space(self.inner.select(&indices))
     }

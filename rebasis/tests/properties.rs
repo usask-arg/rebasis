@@ -1,6 +1,6 @@
 //! Properties every rebasis map should have, checked on small examples.
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayD, ArrayView1, IxDyn};
 use rebasis::{Element, Normalization, Projection, Shape, Space, Weight, evaluate, measure};
 
 const U: Weight = Weight::Uniform;
@@ -165,4 +165,107 @@ fn apply_last_axis_matches_apply_and_dense() {
     }
     let gd = f.dot(&p.to_dense().t());
     close(g.as_slice().unwrap(), gd.as_slice().unwrap(), 1e-12);
+}
+
+/// A x along `axis` by dense matrix products, as the reference for `apply_axis`.
+fn dense_along(a: &Array2<f64>, x: &ArrayD<f64>, axis: usize) -> ArrayD<f64> {
+    let moved = x.view().permuted_axes(moved_last(x.ndim(), axis));
+    let n = moved.shape()[x.ndim() - 1];
+    let lead: Vec<usize> = moved.shape()[..x.ndim() - 1].to_vec();
+    let flat = moved
+        .as_standard_layout()
+        .into_owned()
+        .into_shape_with_order((lead.iter().product(), n))
+        .unwrap();
+    let mut shape = lead.clone();
+    shape.push(a.nrows());
+    let out = flat.dot(&a.t()).into_shape_with_order(shape).unwrap();
+    // move the last axis back to `axis`
+    let mut back: Vec<usize> = (0..x.ndim() - 1).collect();
+    back.insert(axis, x.ndim() - 1);
+    out.permuted_axes(back).as_standard_layout().into_owned()
+}
+
+fn moved_last(ndim: usize, axis: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..ndim).filter(|&d| d != axis).collect();
+    order.push(axis);
+    order
+}
+
+#[test]
+fn apply_axis_matches_dense_along_every_axis() {
+    let hires = Space::hats(&linspace(300.0, 310.0, 101)).unwrap();
+    let ils = Space::gaussians(&linspace(301.0, 309.0, 9), &[0.3], 6.0).unwrap();
+    let w = measure(&ils, &hires, Normalization::Integral, U);
+    let wd = w.to_dense();
+    // sasktran2 shapes: radiance (wavelength, los, stokes), derivatives (parameter, wavelength,
+    // los, stokes), optical properties (location, wavelength)
+    for (shape, axis) in [
+        (vec![101, 4, 3], 0),
+        (vec![2, 101, 4, 3], 1),
+        (vec![5, 101], 1),
+        (vec![101], 0),
+        (vec![3, 4, 101], 2),
+    ] {
+        let x = ArrayD::from_shape_fn(IxDyn(&shape), |i| {
+            (0..shape.len())
+                .map(|d| ((d + 1) * i[d]) as f64)
+                .sum::<f64>()
+                .sin()
+        });
+        let g = w.apply_axis(x.view(), axis);
+        let mut expected_shape = shape.clone();
+        expected_shape[axis] = 9;
+        assert_eq!(g.shape(), expected_shape.as_slice());
+        let r = dense_along(&wd, &x, axis);
+        close(
+            g.as_standard_layout().as_slice().unwrap(),
+            r.as_slice().unwrap(),
+            1e-12,
+        );
+        // strided input (a transposed view) gives the same result
+        let xt = x.t().as_standard_layout().into_owned();
+        let gt = w.apply_axis(xt.t(), axis);
+        close(
+            gt.as_standard_layout().as_slice().unwrap(),
+            r.as_slice().unwrap(),
+            1e-12,
+        );
+    }
+}
+
+#[test]
+fn apply_transpose_axis_is_the_adjoint() {
+    let hires = Space::hats(&linspace(0.0, 1.0, 40)).unwrap();
+    let ils = Space::rectangles(&linspace(0.1, 0.9, 6), &[0.15]).unwrap();
+    let w = measure(&ils, &hires, Normalization::Integral, U);
+    let x = ArrayD::from_shape_fn(IxDyn(&[40, 2, 3]), |i| {
+        (i[0] as f64 * 0.3 + i[1] as f64 - i[2] as f64).cos()
+    });
+    let y = ArrayD::from_shape_fn(IxDyn(&[6, 2, 3]), |i| {
+        (i[0] as f64 + 0.5 * i[2] as f64).sin()
+    });
+    // ⟨y, W x⟩ = ⟨Wᵀ y, x⟩
+    let lhs = (&y * &w.apply_axis(x.view(), 0)).sum();
+    let rhs = (&w.apply_transpose_axis(y.view(), 0) * &x).sum();
+    assert!(
+        (lhs - rhs).abs() <= 1e-12 * lhs.abs().max(1.0),
+        "{lhs} vs {rhs}"
+    );
+}
+
+#[test]
+fn concatenated_kernels_measure_as_stacked_rows() {
+    let hires = Space::hats(&linspace(0.0, 10.0, 201)).unwrap();
+    let a = Space::gaussians(&[2.0, 4.0], &[0.2], 6.0).unwrap();
+    let b = Space::rectangles(&[6.0], &[0.5]).unwrap();
+    let c = Space::deltas(&[8.3]).unwrap();
+    let both = Space::concatenate(&[&a, &b, &c]);
+    assert_eq!(both.len(), 4);
+    let w = measure(&both, &hires, Normalization::Integral, U).to_dense();
+    for (rows, space) in [(0..2, &a), (2..3, &b), (3..4, &c)] {
+        let part = measure(space, &hires, Normalization::Integral, U).to_dense();
+        let got = w.slice(ndarray::s![rows, ..]).to_owned();
+        close(got.as_slice().unwrap(), part.as_slice().unwrap(), 0.0);
+    }
 }

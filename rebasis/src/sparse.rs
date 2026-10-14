@@ -1,6 +1,9 @@
 //! Compressed sparse row matrices: the output of every rebasis operation.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, Zip};
+use ndarray::parallel::prelude::*;
+use ndarray::{
+    Array1, Array2, ArrayD, ArrayView1, ArrayView2, ArrayViewD, ArrayViewMut1, Axis, Zip,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Csr {
@@ -91,27 +94,80 @@ impl Csr {
         idx.iter().zip(val).map(|(&j, v)| v * x[j]).sum()
     }
 
+    /// o = A x for one lane x of length ncols (copied only if it is strided).
+    fn apply_lane(&self, x: ArrayView1<f64>, mut o: ArrayViewMut1<f64>) {
+        let copied;
+        let x = match x.as_slice() {
+            Some(s) => s,
+            None => {
+                copied = x.to_vec();
+                &copied
+            }
+        };
+        for (i, v) in o.iter_mut().enumerate() {
+            *v = self.row_dot(i, x);
+        }
+    }
+
     /// A x for x of length ncols.
     pub fn apply(&self, x: ArrayView1<f64>) -> Array1<f64> {
         assert_eq!(x.len(), self.ncols, "x has the wrong length");
-        let x = x.to_vec();
-        Array1::from_shape_fn(self.nrows, |i| self.row_dot(i, &x))
+        let mut out = Array1::zeros(self.nrows);
+        self.apply_lane(x, out.view_mut());
+        out
     }
 
-    /// Applies A along the last axis: x has shape (k, ncols), the result (k, nrows). This is the
-    /// layout of sasktran2 outputs, with the spectral dimension last.
+    /// Applies A along the last axis: x has shape (k, ncols), the result (k, nrows), e.g.
+    /// sasktran2 optical properties of shape (location, wavelength).
     pub fn apply_last_axis(&self, x: ArrayView2<f64>) -> Array2<f64> {
         assert_eq!(x.ncols(), self.ncols, "x has the wrong number of columns");
-        let mut out = Array2::zeros((x.nrows(), self.nrows));
-        Zip::from(out.axis_iter_mut(Axis(0)))
-            .and(x.axis_iter(Axis(0)))
-            .par_for_each(|mut o, xr| {
-                let xr = xr.to_vec();
-                for (i, v) in o.iter_mut().enumerate() {
-                    *v = self.row_dot(i, &xr);
-                }
-            });
+        self.apply_axis(x.into_dyn(), x.ndim() - 1)
+            .into_dimensionality()
+            .expect("two dimensions in, two out")
+    }
+
+    /// Applies A along `axis` of x, whose length there must be ncols; the result has nrows
+    /// there and the shape of x elsewhere. E.g. sasktran2 radiances (wavelength, los, stokes)
+    /// along axis 0, or their derivatives (parameter, wavelength, los, stokes) along axis 1.
+    pub fn apply_axis(&self, x: ArrayViewD<f64>, axis: usize) -> ArrayD<f64> {
+        assert!(
+            axis < x.ndim(),
+            "axis {axis} out of range for {} dimensions",
+            x.ndim()
+        );
+        assert_eq!(
+            x.len_of(Axis(axis)),
+            self.ncols,
+            "x has the wrong length along axis"
+        );
+        let mut shape = x.shape().to_vec();
+        shape[axis] = self.nrows;
+        let mut out = ArrayD::zeros(shape);
+        if axis + 1 == x.ndim() {
+            // One sparse dot product per output value, over contiguous lanes.
+            Zip::from(out.lanes_mut(Axis(axis)))
+                .and(x.lanes(Axis(axis)))
+                .par_for_each(|o, xl| self.apply_lane(xl, o));
+        } else {
+            // Output slab i is Σ_j a_ij (input slab j): whole slabs at a time, which keeps
+            // the memory access contiguous when the axis is an outer one.
+            out.axis_iter_mut(Axis(axis))
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(i, mut o)| {
+                    let (idx, val) = self.row(i);
+                    for (&j, &v) in idx.iter().zip(val) {
+                        o.scaled_add(v, &x.index_axis(Axis(axis), j));
+                    }
+                });
+        }
         out
+    }
+
+    /// Applies Aᵀ along `axis` of x, whose length there must be nrows (the adjoint of
+    /// [`Csr::apply_axis`], for reverse-mode derivatives).
+    pub fn apply_transpose_axis(&self, x: ArrayViewD<f64>, axis: usize) -> ArrayD<f64> {
+        self.transpose().apply_axis(x, axis)
     }
 
     /// AᵀA, accumulated in band storage (its half bandwidth is the widest column span of a row

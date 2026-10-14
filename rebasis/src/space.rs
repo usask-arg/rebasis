@@ -474,6 +474,16 @@ impl Space {
         ))
     }
 
+    /// The elements of `spaces` one after another, e.g. kernels of different shapes per channel.
+    pub fn concatenate(spaces: &[&Space]) -> Space {
+        Space::new(
+            spaces
+                .iter()
+                .flat_map(|s| s.elements.iter().cloned())
+                .collect(),
+        )
+    }
+
     pub fn len(&self) -> usize {
         self.elements.len()
     }
