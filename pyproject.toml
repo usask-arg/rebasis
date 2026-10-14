@@ -1,0 +1,54 @@
+[build-system]
+requires = ["maturin>=1.9.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rebasis"
+dynamic = ["version"]
+description = "Linear maps between function bases: instrument line shapes, regridding, projection"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "scipy>=1.11"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[dependency-groups]
+dev = ["maturin>=1.9.4,<2.0", "pytest>=8", "ruff>=0.8", "matplotlib>=3.8"]
+
+[tool.uv]
+# Rebuild the editable extension whenever the Rust sources change.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "rebasis/Cargo.toml" },
+    { file = "rebasis/src/**/*.rs" },
+    { file = "rebasis-py/Cargo.toml" },
+    { file = "rebasis-py/src/**/*.rs" },
+]
+
+[tool.maturin]
+manifest-path = "rebasis-py/Cargo.toml"
+python-source = "python"
+module-name = "rebasis._rebasis"
+profile = "release"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "NPY", "RUF"]
+allowed-confusables = ["−", "–", "σ", "Σ", "∫", "⟨", "⟩"]

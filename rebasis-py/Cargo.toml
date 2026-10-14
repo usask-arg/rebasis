@@ -1,0 +1,24 @@
+[package]
+name = "rebasis-py"
+description = "Python extension module for rebasis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "_rebasis"
+crate-type = ["cdylib"]
+# Tested from Python (tests/*.py); as an extension module the crate does not link libpython.
+test = false
+doctest = false
+
+[dependencies]
+rebasis = { path = "../rebasis" }
+ndarray = { workspace = true }
+pyo3 = { version = "0.29", features = ["abi3-py311"] }
+numpy = "0.29"
+
+[build-dependencies]
+pyo3-build-config = "0.29"

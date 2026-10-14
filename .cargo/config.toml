@@ -1,0 +1,6 @@
+[env]
+# scatrs-py is only ever built as a Python extension module: pyo3 then does not link libpython
+# and needs no Python interpreter for `cargo check`/`clippy`/`build`, so the workspace builds
+# wherever the interpreter on PATH is missing or older than 3.11. (It replaces pyo3's deprecated
+# `extension-module` feature; maturin sets the variable itself as well.)
+PYO3_BUILD_EXTENSION_MODULE = "1"

@@ -1,0 +1,15 @@
+[package]
+name = "rebasis"
+description = "Linear maps between function bases: instrument functions, regridding, projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ndarray = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+libm = "0.2"
