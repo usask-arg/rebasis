@@ -7,6 +7,10 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    ignore:
+      # ndarray stays on the version sasktran2 uses, so the crates can share arrays.
+      - dependency-name: ndarray
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       cargo:
         patterns: ["*"]
