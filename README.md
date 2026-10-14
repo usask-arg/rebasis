@@ -114,6 +114,15 @@ of the finite differences.
 | `power`, `asymmetry` | super-Gaussian |
 | `half_width` | smoothed box |
 
+## Averages from sparse samples
+
+`rb.optimal_estimate(values, coords, targets, covariance, noise=..., mean=...)` computes the best
+linear unbiased estimates (kriging) of grid averages, e.g. monthly zonal means, from irregularly
+sampled observations, with uncertainties and the weights each estimate puts on the data. Every
+covariance, including those between box averages, cos-latitude weighted and around a periodic
+longitude, is computed exactly; the mean can be a tensor product of rebasis spaces (universal
+kriging). See the [estimation docs](https://usask-arg.github.io/rebasis/estimation.html).
+
 ## Wavelength and wavenumber
 
 `space.to_wavenumber(jacobian=...)` (and `to_wavelength`, `reciprocal`, `affine`) uses each

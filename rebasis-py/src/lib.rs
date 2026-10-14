@@ -388,6 +388,10 @@ impl PySpace {
         space(self.inner.mapped(map, jacobian))
     }
 
+    fn take(&self, indices: Vec<usize>) -> PyResult<Self> {
+        space(self.inner.select(&indices))
+    }
+
     fn derivative(&self, order: usize) -> PyResult<Self> {
         space(self.inner.derivative(order))
     }
@@ -631,6 +635,90 @@ impl PyFit {
     }
 }
 
+/// One dimension of a separable covariance: (family, length, period or None).
+type DimSpec = (String, f64, Option<f64>);
+
+fn product_covariance(variance: f64, dims: Vec<DimSpec>) -> PyResult<rebasis::ProductCovariance> {
+    if !(variance.is_finite() && variance > 0.0) {
+        return Err(PyValueError::new_err(format!(
+            "variance must be finite and > 0, got {variance}"
+        )));
+    }
+    let dims = dims
+        .into_iter()
+        .map(|(family, length, period)| {
+            let f = rebasis::Family::by_name(&family)?;
+            rebasis::Covariance1d::new(f, length, period)
+        })
+        .collect::<rebasis::Result<Vec<_>>>()
+        .map_err(to_pyerr)?;
+    Ok(rebasis::ProductCovariance { variance, dims })
+}
+
+fn weights(w: Vec<Option<f64>>) -> PyResult<Vec<Weight>> {
+    w.into_iter().map(weight).collect()
+}
+
+/// The covariance matrix between product atoms a (rows) and b (columns); see
+/// `rebasis.covariance`.
+#[pyfunction]
+#[pyo3(signature = (variance, dims, a, wa, b, wb, symmetric=false))]
+#[allow(clippy::too_many_arguments)]
+fn covariance_matrix<'py>(
+    py: Python<'py>,
+    variance: f64,
+    dims: Vec<DimSpec>,
+    a: Vec<Bound<'py, PySpace>>,
+    wa: Vec<Option<f64>>,
+    b: Vec<Bound<'py, PySpace>>,
+    wb: Vec<Option<f64>>,
+    symmetric: bool,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let cov = product_covariance(variance, dims)?;
+    let (wa, wb) = (weights(wa)?, weights(wb)?);
+    let a: Vec<&rebasis::Space> = a.iter().map(|s| &s.get().inner).collect();
+    let b: Vec<&rebasis::Space> = b.iter().map(|s| &s.get().inner).collect();
+    let m = py
+        .detach(|| {
+            cov.matrix(
+                rebasis::Atoms {
+                    spaces: &a,
+                    weights: &wa,
+                },
+                rebasis::Atoms {
+                    spaces: &b,
+                    weights: &wb,
+                },
+                symmetric,
+            )
+        })
+        .map_err(to_pyerr)?;
+    array2(py, m)
+}
+
+/// The variances of product atoms a.
+#[pyfunction]
+fn covariance_diagonal<'py>(
+    py: Python<'py>,
+    variance: f64,
+    dims: Vec<DimSpec>,
+    a: Vec<Bound<'py, PySpace>>,
+    wa: Vec<Option<f64>>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let cov = product_covariance(variance, dims)?;
+    let wa = weights(wa)?;
+    let a: Vec<&rebasis::Space> = a.iter().map(|s| &s.get().inner).collect();
+    let d = py
+        .detach(|| {
+            cov.diagonal(rebasis::Atoms {
+                spaces: &a,
+                weights: &wa,
+            })
+        })
+        .map_err(to_pyerr)?;
+    Ok(PyArray1::from_vec(py, d))
+}
+
 /// Re w(x + iy) for y >= 0, w the Faddeeva function.
 #[pyfunction]
 fn faddeeva_re(x: f64, y: f64) -> f64 {
@@ -650,5 +738,7 @@ fn _rebasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(measure_derivative, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate, m)?)?;
     m.add_function(wrap_pyfunction!(faddeeva_re, m)?)?;
+    m.add_function(wrap_pyfunction!(covariance_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(covariance_diagonal, m)?)?;
     Ok(())
 }

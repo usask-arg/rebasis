@@ -377,6 +377,19 @@ impl Space {
         ))
     }
 
+    /// The elements at `indices` (repeats allowed), in that order.
+    pub fn select(&self, indices: &[usize]) -> Result<Space> {
+        if let Some(&i) = indices.iter().find(|&&i| i >= self.len()) {
+            return invalid(format!(
+                "index {i} out of range for {} elements",
+                self.len()
+            ));
+        }
+        Ok(Space::new(
+            indices.iter().map(|&i| self.elements[i].clone()).collect(),
+        ))
+    }
+
     pub fn len(&self) -> usize {
         self.elements.len()
     }

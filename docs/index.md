@@ -13,6 +13,7 @@ rebasis computes the sparse matrices that turn the coefficients $f_j$ into
 | {func}`~rebasis.evaluate` | $g_i = f(x_i)$ | interpolation, plotting a reconstruction |
 | {class}`~rebasis.Projection` | the best $L^2$ fit $\sum_i g_i G_i \approx f$ | conservative regridding, optionally bounded |
 | {class}`~rebasis.Fit` | model coefficients whose measurements match data | smooth conservative upsampling, smoothing splines |
+| {func}`~rebasis.optimal_estimate` | best linear unbiased estimates of averages, with uncertainties | monthly zonal means from sparse satellite sampling |
 
 Inner products are exact for piecewise polynomials (boxes, hats, B-splines, tabulated shapes)
 and accurate to rounding for the analytic line shapes (Gaussian, Lorentzian, Voigt, pseudo-Voigt,
@@ -40,6 +41,7 @@ lineshapes
 coordinates
 regridding
 derivatives
+estimation
 api
 rust
 ```

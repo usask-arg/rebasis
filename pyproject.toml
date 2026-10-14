@@ -74,4 +74,4 @@ extend-exclude = ["docs/_build", "docs/jupyter_execute"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "NPY", "RUF"]
-allowed-confusables = ["−", "–", "σ", "Σ", "∫", "⟨", "⟩", "×", "γ", "ν"]
+allowed-confusables = ["−", "–", "σ", "Σ", "∫", "⟨", "⟩", "×", "γ", "ν", "ℓ"]

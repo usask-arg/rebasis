@@ -315,6 +315,11 @@ class Space:
 
     # ------------------------------------------------------------- utilities
 
+    def take(self, indices) -> Space:
+        """The elements at ``indices`` (repeats allowed), in that order."""
+        idx = [int(i) for i in np.asarray(indices).ravel()]
+        return Space(self._inner.take(idx), self._kind)
+
     def derivative(self, order: int = 1) -> Space:
         """The ``order``-th derivatives of piecewise-polynomial elements (jumps excluded)."""
         return Space(self._inner.derivative(int(order)), f"d{order}({self._kind})")

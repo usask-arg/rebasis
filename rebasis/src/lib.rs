@@ -14,6 +14,7 @@
 
 mod banded;
 pub mod coordinate;
+pub mod covariance;
 pub mod element;
 pub mod error;
 mod integrate;
@@ -26,6 +27,7 @@ pub mod special;
 
 pub use banded::BandedCholesky;
 pub use coordinate::CoordinateMap;
+pub use covariance::{Atoms, Covariance1d, Family, ProductCovariance};
 pub use element::{Element, Segment, Shape};
 pub use error::{Error, Result};
 pub use integrate::{Weight, inner, inner_derivative, integral, integral_derivative};
@@ -33,6 +35,6 @@ pub use ops::{
     Bounds, Fit, Normalization, Penalty, Projection, evaluate, gram, inner_products, measure,
     measure_derivative,
 };
-pub use profile::{Apodization, FWHM_PER_SIGMA, Parameter, Profile};
+pub use profile::{Apodization, FWHM_PER_SIGMA, MaternOrder, Parameter, Profile};
 pub use space::{Interpolation, Space};
 pub use sparse::Csr;

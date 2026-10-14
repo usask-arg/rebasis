@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `optimal_estimate`: kriging estimates of grid averages from irregular observations, with
+  exact covariances between points, footprints and area-weighted boxes (squared-exponential and
+  Matérn ½, 3/2, 5/2 families, periodic dimensions), constant or basis-function means, posterior
+  uncertainties, weights and the (REML) log likelihood; `log_likelihood` for fitting.
+- `Space.take`; Matérn profiles in the Rust crate.
+
 ## 0.1.0
 
 First release.

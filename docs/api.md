@@ -33,6 +33,17 @@ Regridding
 .. automodule:: rebasis.xarray
    :members: regrid
 
+Estimation
+----------
+
+.. autofunction:: rebasis.optimal_estimate
+.. autoclass:: rebasis.Estimate
+   :members: apply, weight_histogram
+.. autoclass:: rebasis.Covariance
+   :members: replace
+.. autoclass:: rebasis.CovarianceDim
+.. autofunction:: rebasis.log_likelihood
+
 Errors and constants
 --------------------
 
