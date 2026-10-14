@@ -331,8 +331,24 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update
+      # A version published by hand (the first one must be: crates.io offers Trusted Publishing
+      # only for existing crates) is skipped rather than failing the release.
+      - name: Check whether this version is already on crates.io
+        id: published
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked |
+            jq -r '.packages[] | select(.name == "rebasis") | .version')
+          if curl -fsS https://index.crates.io/re/ba/rebasis |
+            jq -e --arg v "$version" 'select(.vers == $v)' > /dev/null; then
+            echo "rebasis $version is already on crates.io; nothing to publish."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.published.outputs.exists == 'false'
         id: auth
-      - run: cargo publish -p rebasis --locked
+      - if: steps.published.outputs.exists == 'false'
+        run: cargo publish -p rebasis --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
