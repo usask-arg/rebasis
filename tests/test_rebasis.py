@@ -74,6 +74,24 @@ def test_shifted_tabulated_shape_with_stretch():
     np.testing.assert_allclose(s.lower, [1.5, 3.0])
 
 
+def test_concatenate_mixes_kernel_shapes():
+    hires = rb.Space.hats(np.linspace(0, 10, 201))
+    parts = [
+        rb.Space.gaussians([2.0, 4.0], fwhm=0.4),
+        rb.Space.rectangles([6.0], width=0.5),
+        rb.Space.deltas([8.3]),
+    ]
+    both = rb.Space.concatenate(parts)
+    assert len(both) == 4
+    assert both.kind == "mixed"
+    assert rb.Space.concatenate(parts[:1]).kind == parts[0].kind
+    np.testing.assert_array_equal(
+        rb.measure(both, hires).toarray(),
+        sp.vstack([rb.measure(p, hires) for p in parts]).toarray(),
+    )
+    np.testing.assert_array_equal(both.lower, np.concatenate([p.lower for p in parts]))
+
+
 def test_boxes_from_centers():
     s = rb.Space.boxes_from_centers([1.0, 2.0, 4.0])
     np.testing.assert_allclose(s.lower, [0.5, 1.5, 3.0])

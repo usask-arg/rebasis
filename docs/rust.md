@@ -12,5 +12,7 @@ is a thin layer over it, and the names correspond:
 | `rb.Projection(src, dst)` | `Projection::new(&src, &dst, weight)` |
 | `space.to_wavenumber(jacobian=True)` | `space.mapped(CoordinateMap::NM_CMINV, true)` |
 
-Results are compressed sparse row matrices (`Csr`) with `apply` and `apply_last_axis` for
-`ndarray` inputs. The crate's API reference is on [docs.rs](https://docs.rs/rebasis).
+Results are compressed sparse row matrices (`Csr`). `apply_axis` applies one along any axis of an
+`ndarray` array, e.g. the wavelength axis 0 of a sasktran2 radiance (wavelength, los, stokes),
+and `apply_transpose_axis` applies its transpose, for reverse-mode derivatives.
+`Space::concatenate` combines kernels of different shapes into one space. The crate's API reference is on [docs.rs](https://docs.rs/rebasis).

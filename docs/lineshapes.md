@@ -27,6 +27,9 @@ FTS apodizations: `"none"` (sinc), `"triangle"` (sinc²), `"hann"`, `"hamming"` 
 `"blackman"`, `"blackman_harris"`, `"norton_beer_weak"`, `"norton_beer_medium"`,
 `"norton_beer_strong"`, or custom cosine-sum or Norton–Beer coefficients.
 
+Channels with different shapes (a Gaussian here, a tabulated shape there) form one space with
+{meth}`~rebasis.Space.concatenate`, so a whole instrument is still a single {func}`~rebasis.measure`.
+
 ```{code-cell} ipython3
 :tags: [hide-input]
 
