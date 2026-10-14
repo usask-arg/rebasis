@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from ._ops import Fit, Projection, _from_rows, _to_rows, measure
+from ._ops import Fit, Projection, _bounds, _from_rows, _to_rows, measure
 from ._space import Space
 
 METHODS = ("project", "measure", "interpolate", "fit")
@@ -22,7 +22,7 @@ def _operator(src: Space, dst: Space, method: str, weight, fit_options: dict[str
     """A callable (rows (k, n_src), bounded) -> (k, n_dst)."""
     if method == "project":
         p = Projection(src, dst, weight)
-        return lambda rows, bounded: p._inner.apply_last_axis(rows, bounded)
+        return lambda rows, bounded: p._inner.apply_last_axis(rows, _bounds(bounded))
     if method == "measure":
         w = measure(dst, src, "integral", weight)
         return lambda rows, bounded: (w @ rows.T).T
@@ -44,7 +44,7 @@ def regrid(
     *,
     method: str = "project",
     weight=None,
-    bounded: bool = False,
+    bounded=False,
     skipna: bool = False,
     na_thres: float = 0.5,
     **fit_options,
@@ -63,18 +63,19 @@ def regrid(
     weight
         Weight of the inner products, e.g. ``"cos_lat_deg"`` for latitude.
     bounded
-        ``"project"`` only: keep outputs within the range of the overlapping inputs while
-        conserving the integral.
+        ``"project"`` only: the best conservative approximation within bounds, see
+        :meth:`Projection.apply` (``True``/``"local"``: no new extrema; ``"positive"``;
+        ``(lo, hi)``).
     skipna
         Treat NaN as missing: regrid the data with NaN set to 0 and divide by the regridded
         validity mask (outputs whose valid fraction is below ``na_thres`` are NaN). Exact for
         maps that preserve constants (projection onto boxes, hats or clamped B-splines, and
         measure).
     """
-    if bounded and method != "project":
+    if _bounds(bounded) is not None and method != "project":
         msg = "bounded is only supported for method='project'"
         raise ValueError(msg)
-    if bounded and skipna:
+    if _bounds(bounded) is not None and skipna:
         msg = "bounded and skipna cannot be combined"
         raise ValueError(msg)
     op = _operator(src, dst, method, weight, fit_options)
@@ -85,8 +86,8 @@ def regrid(
     if skipna:
         valid = np.isfinite(rows)
         filled = np.ascontiguousarray(np.where(valid, rows, 0.0))
-        num = op(filled, False)
-        den = op(np.ascontiguousarray(valid.astype(np.float64)), False)
+        num = op(filled, None)
+        den = op(np.ascontiguousarray(valid.astype(np.float64)), None)
         with np.errstate(invalid="ignore", divide="ignore"):
             out = np.where(den >= na_thres, num / den, np.nan)
     else:
@@ -99,7 +100,7 @@ def regrid_nd(
     axes: Mapping[int, tuple],
     *,
     method: str = "project",
-    bounded: bool = False,
+    bounded=False,
     skipna: bool = False,
     na_thres: float = 0.5,
     **fit_options,

@@ -70,8 +70,10 @@ can be scalars or arrays.
 - `rb.regrid(data, src, dst, axis, method=...)`: `"project"` (conservative, default),
   `"measure"` (`dst` as averaging kernels), `"interpolate"`, or `"fit"` (smooth conservative
   upsampling of bin averages onto a spline `dst`).
-  - `bounded=True` keeps results within the range of the overlapping inputs while conserving the
-    integral (clip and assured sum).
+  - `bounded=True` gives the best L2 approximation that conserves the integral and creates no new
+    extrema: each coefficient stays within the range of the inputs it overlaps. It solves a
+    small banded quadratic program exactly, so corrections stay local.
+    `bounded="positive"` and `bounded=(lo, hi)` apply global bounds instead.
   - `skipna=True` handles missing data.
   - `weight="cos_lat_deg"` gives area weighting in latitude.
 - `rb.regrid_nd(data, {axis: (src, dst[, weight]), ...})`: tensor-product grids, one axis at a
@@ -81,6 +83,25 @@ can be scalars or arrays.
 - `rb.Fit(kernels, model, smoothing=..., penalty="derivative", order=2)` is the general
   penalized least-squares fit. The penalty is ∫(f⁽ʳ⁾)² (a smoothing spline) or coefficient
   differences (P-splines).
+
+## Derivatives with respect to line-shape parameters
+
+`rb.measure_derivative(kernels, basis, parameter)` returns `(W, dW)`, where `dW` is ∂W/∂p with
+row i differentiated with respect to kernel i's parameter. For a spectrum `f`, `dW @ f` is the
+Jacobian of the measurements with respect to per-channel parameters (diagonal), or with respect
+to one parameter shared by all channels. The derivatives are exact: they include the moving
+truncation edges and the normalization, and they agree with finite differences to the accuracy
+of the finite differences.
+
+| parameter | kernels |
+|---|---|
+| `center` | all (spectral shift) |
+| `scale` | all but deltas: width · ∂/∂width, every width scaled together (squeeze or stretch) |
+| `sigma` | Gaussian, Voigt, smoothed box |
+| `gamma` | Lorentzian, Voigt |
+| `eta` | pseudo-Voigt |
+| `power`, `asymmetry` | super-Gaussian |
+| `half_width` | smoothed box |
 
 ## Development
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from . import _rebasis
 from ._ops import (
+    PARAMETERS,
     Fit,
     Projection,
     apply_along,
@@ -32,6 +33,7 @@ from ._ops import (
     gram,
     inner_products,
     measure,
+    measure_derivative,
     project,
 )
 from ._rebasis import SingularError, faddeeva_re
@@ -53,6 +55,7 @@ def __getattr__(name: str):
 
 __all__ = [
     "FWHM_PER_SIGMA",
+    "PARAMETERS",
     "Fit",
     "Projection",
     "SingularError",
@@ -64,6 +67,7 @@ __all__ = [
     "gram",
     "inner_products",
     "measure",
+    "measure_derivative",
     "project",
     "regrid",
     "regrid_nd",

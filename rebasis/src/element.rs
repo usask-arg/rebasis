@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::error::{Result, invalid};
-use crate::profile::Profile;
+use crate::profile::{Parameter, Profile};
 
 /// One cubic piece p(x) = Σ c_m (x − a)^m on [a, b).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,6 +25,13 @@ impl Segment {
         let u = x - self.a;
         let c = &self.coeffs;
         ((c[3] * u + c[2]) * u + c[1]) * u + c[0]
+    }
+
+    #[inline]
+    fn slope(&self, x: f64) -> f64 {
+        let u = x - self.a;
+        let c = &self.coeffs;
+        (3.0 * c[3] * u + 2.0 * c[2]) * u + c[1]
     }
 
     fn integral(&self) -> f64 {
@@ -219,6 +226,42 @@ impl Shape {
     pub fn integral(&self) -> f64 {
         self.segments.iter().map(Segment::integral).sum()
     }
+
+    /// d/du, excluding jumps.
+    pub fn slope(&self, u: f64) -> f64 {
+        let k = self.segments.partition_point(|s| s.a <= u);
+        if k == 0 {
+            return 0.0;
+        }
+        let s = &self.segments[k - 1];
+        if u < s.b { s.slope(u) } else { 0.0 }
+    }
+
+    /// The jumps (u, value after − value before), including those at the ends.
+    fn jumps(&self) -> Vec<(f64, f64)> {
+        let mut out = Vec::new();
+        let n = self.segments.len();
+        for (k, seg) in self.segments.iter().enumerate() {
+            let before = if k > 0 && self.segments[k - 1].b == seg.a {
+                let prev = &self.segments[k - 1];
+                prev.eval(prev.b)
+            } else {
+                0.0
+            };
+            let jump = seg.eval(seg.a) - before;
+            if jump != 0.0 {
+                out.push((seg.a, jump));
+            }
+            let contiguous = k + 1 < n && self.segments[k + 1].a == seg.b;
+            if !contiguous {
+                let end = seg.eval(seg.b);
+                if end != 0.0 {
+                    out.push((seg.b, -end));
+                }
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,12 +278,13 @@ pub enum Element {
         center: f64,
         stretch: f64,
     },
-    /// profile(x − center) on [lo, hi], 0 elsewhere.
+    /// profile(x − center) on [lo, hi], 0 elsewhere; the support is that of `cutoff`.
     Profile {
         profile: Profile,
         center: f64,
         lo: f64,
         hi: f64,
+        cutoff: f64,
     },
 }
 
@@ -279,6 +323,7 @@ impl Element {
             center,
             lo: center - left,
             hi: center + right,
+            cutoff,
         })
     }
 
@@ -360,6 +405,7 @@ impl Element {
                 center,
                 lo,
                 hi,
+                ..
             } => {
                 if x < *lo || x > *hi {
                     0.0
@@ -422,6 +468,117 @@ impl Element {
         }
         let d = d.scaled(stretch.powi(-(order as i32)));
         Element::piecewise(Arc::new(d), center, stretch)
+    }
+
+    /// dφ/dx, excluding jumps (0 for a delta).
+    pub fn slope(&self, x: f64) -> f64 {
+        match self {
+            Element::Delta { .. } | Element::Box { .. } => 0.0,
+            Element::Hat { a, c, b } => {
+                if x < *a || x > *b {
+                    0.0
+                } else if x < *c {
+                    1.0 / (c - a)
+                } else if x > *c {
+                    -1.0 / (b - c)
+                } else {
+                    0.0
+                }
+            }
+            Element::Profile {
+                profile,
+                center,
+                lo,
+                hi,
+                ..
+            } => {
+                if x < *lo || x > *hi {
+                    0.0
+                } else {
+                    profile.d_dt(x - center)
+                }
+            }
+            Element::Piecewise {
+                shape,
+                center,
+                stretch,
+            } => shape.slope((x - center) / stretch) / stretch,
+        }
+    }
+
+    /// ∂φ/∂p at fixed x, excluding the point terms of [`Element::jumps`].
+    pub fn d_smooth(&self, x: f64, p: Parameter) -> Result<f64> {
+        let c = self.center();
+        Ok(match p {
+            // φ(x − c): ∂/∂c = −φ'
+            Parameter::Center => -self.slope(x),
+            // φ((x − c)/s) at s = 1: ∂/∂s = −(x − c) φ'
+            Parameter::Scale => -(x - c) * self.slope(x),
+            _ => match self {
+                Element::Profile {
+                    profile, lo, hi, ..
+                } => {
+                    if x < *lo || x > *hi {
+                        0.0
+                    } else {
+                        profile.d_param(x - c, p)?
+                    }
+                }
+                _ => return invalid(format!("{p:?} applies only to line-shape profiles")),
+            },
+        })
+    }
+
+    /// The point terms (x_k, a_k) of ∂φ/∂p: ∂/∂p ∫ φ ψ w = ∫ (∂φ/∂p) ψ w + Σ a_k ψ(x_k) w(x_k).
+    /// They come from jumps of φ (box edges, truncated profile ends) moving with p.
+    pub fn jumps(&self, p: Parameter) -> Result<Vec<(f64, f64)>> {
+        let c = self.center();
+        // jumps J_k of φ at x_k; a translation or dilation moves them, giving −J_k ∂x_k/∂p
+        let raw: Vec<(f64, f64)> = match self {
+            Element::Delta { .. } => return Ok(vec![]),
+            Element::Box { a, b } => vec![(*a, 1.0), (*b, -1.0)],
+            Element::Hat { a, c: m, b } => {
+                let mut v = Vec::new();
+                if a == m {
+                    v.push((*a, 1.0));
+                }
+                if m == b {
+                    v.push((*b, -1.0));
+                }
+                v
+            }
+            Element::Piecewise {
+                shape,
+                center,
+                stretch,
+            } => shape
+                .jumps()
+                .into_iter()
+                .map(|(u, j)| (center + stretch * u, j))
+                .collect(),
+            Element::Profile {
+                profile,
+                center,
+                lo,
+                hi,
+                cutoff,
+            } => {
+                let (k_lo, k_hi) = (profile.value(lo - center), profile.value(hi - center));
+                match p {
+                    Parameter::Center | Parameter::Scale => vec![(*lo, k_lo), (*hi, -k_hi)],
+                    _ => {
+                        // the support edges move with the parameter
+                        let (dl, dr) = profile.d_support(*cutoff, p)?;
+                        return Ok(vec![(*lo, k_lo * dl), (*hi, k_hi * dr)]);
+                    }
+                }
+            }
+        };
+        match p {
+            Parameter::Center => Ok(raw.into_iter().map(|(x, j)| (x, -j)).collect()),
+            Parameter::Scale => Ok(raw.into_iter().map(|(x, j)| (x, -(x - c) * j)).collect()),
+            _ => invalid(format!("{p:?} applies only to line-shape profiles")),
+        }
     }
 
     /// The profile and its center, for the integrator's step control.

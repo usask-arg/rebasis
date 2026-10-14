@@ -2,7 +2,10 @@
 //! the line center, each normalized to 1 at t = 0.
 
 use crate::error::{Result, invalid};
-use crate::special::{erf_diff, faddeeva_re, sinc, spherical_bessel_over_power};
+use crate::special::{
+    erf_diff, faddeeva, faddeeva_derivative, faddeeva_re, sinc, sinc_derivative,
+    spherical_bessel_over_power,
+};
 
 const LN2: f64 = std::f64::consts::LN_2;
 
@@ -84,6 +87,77 @@ impl Apodization {
                 s
             }
         }
+    }
+}
+
+impl Apodization {
+    /// d/dx of [`Apodization::line_shape`].
+    pub fn line_shape_derivative(&self, x: f64) -> f64 {
+        let pi = std::f64::consts::PI;
+        match self {
+            Apodization::CosineSum(a) => {
+                let mut s = 2.0 * a[0] * sinc_derivative(x);
+                for (m, am) in a.iter().enumerate().skip(1) {
+                    if *am != 0.0 {
+                        let k = m as f64 * pi;
+                        s += am * (sinc_derivative(x - k) + sinc_derivative(x + k));
+                    }
+                }
+                s
+            }
+            Apodization::Triangle => sinc(0.5 * x) * sinc_derivative(0.5 * x),
+            Apodization::Polynomial(c) => {
+                // d/dx (j_i / x^i) = −x j_(i+1) / x^(i+1)
+                let g = spherical_bessel_over_power(x);
+                let mut fact = 1.0;
+                let mut s = 0.0;
+                for i in 0..5 {
+                    if i > 0 {
+                        fact *= i as f64;
+                    }
+                    s -= c[i] * fact * 2f64.powi(i as i32 + 1) * x * g[i + 1];
+                }
+                s
+            }
+        }
+    }
+}
+
+/// A parameter of a measurement kernel to differentiate with respect to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parameter {
+    /// The center (a spectral shift), for every kernel.
+    Center,
+    /// The logarithm of a common scale of all widths (squeeze/stretch): width · ∂/∂width, for
+    /// every kernel but deltas.
+    Scale,
+    /// σ of a Gaussian, Voigt or smoothed box.
+    Sigma,
+    /// γ (half width) of a Lorentzian or Voigt.
+    Gamma,
+    /// η of a pseudo-Voigt.
+    Eta,
+    /// The power of a super-Gaussian.
+    Power,
+    /// The asymmetry a of a super-Gaussian (half widths w(1 − a) and w(1 + a)).
+    Asymmetry,
+    /// The box half width of a smoothed box.
+    HalfWidth,
+}
+
+impl Parameter {
+    pub fn by_name(name: &str) -> Result<Self> {
+        Ok(match name {
+            "center" => Parameter::Center,
+            "scale" => Parameter::Scale,
+            "sigma" => Parameter::Sigma,
+            "gamma" => Parameter::Gamma,
+            "eta" => Parameter::Eta,
+            "power" => Parameter::Power,
+            "asymmetry" => Parameter::Asymmetry,
+            "half_width" => Parameter::HalfWidth,
+            other => return invalid(format!("unknown parameter {other:?}")),
+        })
     }
 }
 
@@ -256,6 +330,181 @@ impl Profile {
         }
     }
 
+    /// d/dt of [`Profile::value`].
+    pub fn d_dt(&self, t: f64) -> f64 {
+        let pi = std::f64::consts::PI;
+        match *self {
+            Profile::Gaussian { sigma } => -t / (sigma * sigma) * self.value(t),
+            Profile::Lorentzian { hwhm } => {
+                let u = t / hwhm;
+                -2.0 * u / (hwhm * (1.0 + u * u).powi(2))
+            }
+            Profile::Voigt {
+                sigma,
+                gamma,
+                inv_peak,
+            } => {
+                let s = sigma * std::f64::consts::SQRT_2;
+                faddeeva_derivative(t / s, gamma / s).0 / s * inv_peak
+            }
+            Profile::PseudoVoigt { hwhm, eta } => {
+                let u = t / hwhm;
+                eta * (-2.0 * u / (hwhm * (1.0 + u * u).powi(2)))
+                    + (1.0 - eta) * (-2.0 * LN2 * u / hwhm) * (-LN2 * u * u).exp()
+            }
+            Profile::SuperGaussian {
+                hwhm_left,
+                hwhm_right,
+                power,
+            } => {
+                if t == 0.0 {
+                    return 0.0;
+                }
+                let w = if t < 0.0 { hwhm_left } else { hwhm_right };
+                let u = t.abs() / w;
+                -LN2 * power * u.powf(power - 1.0) * t.signum() / w * self.value(t)
+            }
+            Profile::SmoothedBox {
+                half_width,
+                sigma,
+                inv_peak,
+            } => {
+                let s = sigma * std::f64::consts::SQRT_2;
+                let (a, b) = ((t + half_width) / s, (t - half_width) / s);
+                2.0 / pi.sqrt() / s * ((-a * a).exp() - (-b * b).exp()) * inv_peak
+            }
+            Profile::Fts {
+                max_opd,
+                apodization,
+                inv_peak,
+            } => {
+                let k = 2.0 * pi * max_opd;
+                k * apodization.line_shape_derivative(k * t) * inv_peak
+            }
+        }
+    }
+
+    /// ∂/∂p of [`Profile::value`] at fixed offset t, for a profile-specific parameter.
+    pub fn d_param(&self, t: f64, p: Parameter) -> Result<f64> {
+        let pi = std::f64::consts::PI;
+        Ok(match (*self, p) {
+            (Profile::Gaussian { sigma }, Parameter::Sigma) => {
+                t * t / (sigma * sigma * sigma) * self.value(t)
+            }
+            (Profile::Lorentzian { hwhm }, Parameter::Gamma) => {
+                let u = t / hwhm;
+                2.0 * u * u / (hwhm * (1.0 + u * u).powi(2))
+            }
+            (
+                Profile::Voigt {
+                    sigma,
+                    gamma,
+                    inv_peak,
+                },
+                Parameter::Sigma | Parameter::Gamma,
+            ) => {
+                // K = Re w(z) / Re w(z0), z = (t + iγ)/s, z0 = iγ/s, s = σ√2
+                let s = sigma * std::f64::consts::SQRT_2;
+                let (x, y) = (t / s, gamma / s);
+                // ∂z/∂σ = −z/σ; ∂z/∂γ = i/s (same for z0)
+                let dz = |zx: f64, zy: f64| match p {
+                    Parameter::Sigma => (-zx / sigma, -zy / sigma),
+                    _ => (0.0, 1.0 / s),
+                };
+                let re_mul = |(ar, ai): (f64, f64), (br, bi): (f64, f64)| ar * br - ai * bi;
+                let dk = re_mul(faddeeva_derivative(x, y), dz(x, y));
+                let dk0 = re_mul(faddeeva_derivative(0.0, y), dz(0.0, y));
+                let k = faddeeva(x, y).0;
+                dk * inv_peak - k * dk0 * inv_peak * inv_peak
+            }
+            (Profile::PseudoVoigt { hwhm, .. }, Parameter::Eta) => {
+                let u = t / hwhm;
+                1.0 / (1.0 + u * u) - (-LN2 * u * u).exp()
+            }
+            (
+                Profile::SuperGaussian {
+                    hwhm_left,
+                    hwhm_right,
+                    power,
+                },
+                Parameter::Power | Parameter::Asymmetry,
+            ) => {
+                if t == 0.0 {
+                    return Ok(0.0);
+                }
+                let w = if t < 0.0 { hwhm_left } else { hwhm_right };
+                let u = t.abs() / w;
+                let up = u.powf(power);
+                let k = self.value(t);
+                if p == Parameter::Power {
+                    -LN2 * up * u.ln() * k
+                } else {
+                    // ∂K/∂w · ∂w/∂a with w = h(1 ∓ a), h the mean half width
+                    let h = 0.5 * (hwhm_left + hwhm_right);
+                    LN2 * power * up / w * k * if t < 0.0 { -h } else { h }
+                }
+            }
+            (
+                Profile::SmoothedBox {
+                    half_width,
+                    sigma,
+                    inv_peak,
+                },
+                Parameter::HalfWidth | Parameter::Sigma,
+            ) => {
+                let s = sigma * std::f64::consts::SQRT_2;
+                let c = 2.0 / pi.sqrt();
+                let d_e = |t: f64| {
+                    let (a, b) = ((t + half_width) / s, (t - half_width) / s);
+                    if p == Parameter::HalfWidth {
+                        c / s * ((-a * a).exp() + (-b * b).exp())
+                    } else {
+                        -c / sigma * (a * (-a * a).exp() - b * (-b * b).exp())
+                    }
+                };
+                let e = erf_diff((t - half_width) / s, (t + half_width) / s);
+                d_e(t) * inv_peak - e * d_e(0.0) * inv_peak * inv_peak
+            }
+            (profile, p) => {
+                return invalid(format!("{profile:?} has no parameter {p:?}"));
+            }
+        })
+    }
+
+    /// ∂/∂p of the support extents (left, right) returned by [`Profile::support`].
+    pub fn d_support(&self, cutoff: f64, p: Parameter) -> Result<(f64, f64)> {
+        Ok(match (*self, p) {
+            (Profile::Gaussian { .. }, Parameter::Sigma)
+            | (Profile::Lorentzian { .. }, Parameter::Gamma)
+            | (Profile::SmoothedBox { .. }, Parameter::Sigma) => (cutoff, cutoff),
+            (Profile::SmoothedBox { .. }, Parameter::HalfWidth) => (1.0, 1.0),
+            (Profile::Voigt { sigma, gamma, .. }, Parameter::Sigma | Parameter::Gamma) => {
+                let (fg, fl) = (FWHM_PER_SIGMA * sigma, 2.0 * gamma);
+                let root = (0.2166 * fl * fl + fg * fg).sqrt();
+                let d = if p == Parameter::Sigma {
+                    0.5 * fg * FWHM_PER_SIGMA / root
+                } else {
+                    0.5 * (0.5346 * 2.0 + 0.2166 * fl * 2.0 / root)
+                };
+                (cutoff * d, cutoff * d)
+            }
+            (Profile::PseudoVoigt { .. }, Parameter::Eta)
+            | (Profile::SuperGaussian { .. }, Parameter::Power) => (0.0, 0.0),
+            (
+                Profile::SuperGaussian {
+                    hwhm_left,
+                    hwhm_right,
+                    ..
+                },
+                Parameter::Asymmetry,
+            ) => {
+                let h = 0.5 * (hwhm_left + hwhm_right);
+                (-cutoff * h, cutoff * h)
+            }
+            (profile, p) => return invalid(format!("{profile:?} has no parameter {p:?}")),
+        })
+    }
+
     /// Half width at half maximum (approximate for the Voigt profile, Olivero & Longbothum 1977).
     pub fn hwhm(&self) -> f64 {
         match *self {
@@ -313,14 +562,10 @@ impl Profile {
                 hwhm_right,
                 power,
             } => {
+                // |t|^p (and the |t|^p ln|t| of its power derivative) is not smooth at 0
+                // unless p is an even integer: grade the sub-intervals geometrically into it
                 let w = hwhm_left.min(hwhm_right);
-                let base = w / power.max(2.0);
-                if power.fract() == 0.0 && (power as i64) % 2 == 0 {
-                    base
-                } else {
-                    // |t|^p is not smooth at 0: grade the sub-intervals geometrically into it
-                    base.min(1e-8 * w + 0.3 * d)
-                }
+                (w / power.max(2.0)).min(1e-8 * w + 0.3 * d)
             }
             Profile::SmoothedBox { sigma, .. } => sigma,
             // band-limited to |δ| <= L: a quarter period of the fastest oscillation

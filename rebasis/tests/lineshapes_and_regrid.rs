@@ -2,8 +2,8 @@
 
 use ndarray::{Array1, Array2};
 use rebasis::{
-    Apodization, Error, Fit, Normalization, Penalty, Profile, Projection, Space, Weight, evaluate,
-    measure,
+    Apodization, Bounds, Error, Fit, Normalization, Penalty, Profile, Projection, Space, Weight,
+    evaluate, measure,
 };
 
 const U: Weight = Weight::Uniform;
@@ -144,12 +144,25 @@ fn bounded_projection_does_not_overshoot_and_conserves() {
     let p = Projection::new(&fine, &coarse, U).unwrap();
     let f2 = f.clone().insert_axis(ndarray::Axis(0));
     let plain = p.apply_last_axis(f2.view());
-    let bounded = p.apply_bounded_last_axis(f2.view());
+    let bounded = p.apply_bounded_last_axis(f2.view(), Bounds::Local);
     assert!(
         plain.iter().any(|&v| !(-1e-12..=1.0 + 1e-12).contains(&v)),
         "plain should overshoot"
     );
     assert!(bounded.iter().all(|&v| (-1e-14..=1.0 + 1e-14).contains(&v)));
+    // the bounded result is the best bounded L2 fit: no worse than clipping the plain one
+    let fine_vals = |g: &Array2<f64>| {
+        let e = evaluate(&coarse, &x[..x.len() - 1]).unwrap();
+        e.apply(g.row(0))
+    };
+    let err = |v: Array1<f64>| {
+        v.iter()
+            .zip(f.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+    };
+    let clipped = plain.mapv(|v| v.clamp(0.0, 1.0));
+    assert!(err(fine_vals(&bounded)) <= err(fine_vals(&clipped)) * 1.0001);
     let mass = coarse.integrals(U);
     let total = |g: &Array2<f64>| g.row(0).iter().zip(&mass).map(|(a, b)| a * b).sum::<f64>();
     let truth: f64 = f.iter().zip(fine.integrals(U)).map(|(a, b)| a * b).sum();

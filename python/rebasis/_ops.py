@@ -26,6 +26,20 @@ def _weight_scale(weight) -> float | None:
     return float(weight)
 
 
+def _bounds(bounded):
+    """False/None, True/"local", "positive", or (lo, hi) -> the extension's bounds argument."""
+    if bounded is None or bounded is False:
+        return None
+    if bounded is True or bounded == "local":
+        return "local"
+    if bounded == "positive":
+        return (0.0, math.inf)
+    if isinstance(bounded, tuple) and len(bounded) == 2:
+        return (float(bounded[0]), float(bounded[1]))
+    msg = f"bounded must be False, True/'local', 'positive' or (lo, hi), got {bounded!r}"
+    raise ValueError(msg)
+
+
 def _csr(parts) -> sp.csr_array:
     indptr, indices, data, shape = parts
     return sp.csr_array((data, indices, indptr), shape=shape)
@@ -71,6 +85,48 @@ def measure(
     return _csr(parts)
 
 
+PARAMETERS = {
+    "center": "every kernel: a shift of the center",
+    "scale": "every kernel but deltas: width · ∂/∂width, all widths scaled together",
+    "sigma": "Gaussian, Voigt (Gaussian part), smoothed box (blur)",
+    "gamma": "Lorentzian (HWHM), Voigt (Lorentzian half width)",
+    "eta": "pseudo-Voigt",
+    "power": "super-Gaussian",
+    "asymmetry": "super-Gaussian",
+    "half_width": "smoothed box (half the box width)",
+}
+
+
+def measure_derivative(
+    kernels: Space,
+    basis: Space,
+    parameter: str,
+    normalization: str = "integral",
+    weight=None,
+) -> tuple[sp.csr_array, sp.csr_array]:
+    """The measurement matrix W and its derivative ∂W/∂p.
+
+    Row i is differentiated with respect to the parameter of kernel i alone, so for spectra
+    f the Jacobian of the measurements g = W @ f with respect to the per-channel parameters is
+    diagonal, with diagonal ``dW @ f``. For a single parameter shared by all channels (e.g. a
+    common spectral shift) the derivative is also ``dW @ f``.
+
+    The derivatives are exact (to rounding) derivatives of what :func:`measure` computes,
+    including the truncation of the kernels' supports and the normalization.
+
+    Parameters
+    ----------
+    parameter
+        One of: ``"center"`` (shift), ``"scale"`` (width · ∂/∂width, squeeze or stretch),
+        ``"sigma"``, ``"gamma"``, ``"eta"``, ``"power"``, ``"asymmetry"``, ``"half_width"``;
+        see ``rebasis.PARAMETERS`` for which kernels have which.
+    """
+    w, dw = _rebasis.measure_derivative(
+        kernels._inner, basis._inner, normalization, parameter, _weight_scale(weight)
+    )
+    return _csr(w), _csr(dw)
+
+
 def evaluate(basis: Space, x) -> sp.csr_array:
     """The matrix E with E @ f = f(x), shape (len(x), len(basis))."""
     return _csr(_rebasis.evaluate(basis._inner, _vec(x, "x")))
@@ -106,16 +162,20 @@ class Projection:
     def shape(self) -> tuple[int, int]:
         return (self._inner.n_dst, self._inner.n_src)
 
-    def apply(self, f, axis: int = -1, bounded: bool = False) -> np.ndarray:
+    def apply(self, f, axis: int = -1, bounded=False) -> np.ndarray:
         """Projects ``f`` along ``axis``.
 
-        With ``bounded``, each output stays within the range of the source coefficients it
-        overlaps (no new extrema or negative values), with the clipped mass redistributed so
-        the integral is unchanged (clip and assured sum). Meaningful when coefficients are
-        values: boxes, hats, B-splines.
+        ``bounded`` gives the best L2 approximation within bounds that still conserves the
+        integral (a small quadratic program, solved exactly):
+
+        - ``True`` / ``"local"``: each output within the range of the source coefficients it
+          overlaps, so no new extrema or overshoot. Meaningful when coefficients are values
+          (boxes, hats, B-splines, whose functions then also stay within the bounds).
+        - ``"positive"``: outputs >= 0.
+        - ``(lo, hi)``: outputs in [lo, hi].
         """
         rows, lead = _to_rows(f, axis)
-        return _from_rows(self._inner.apply_last_axis(rows, bounded), lead, axis)
+        return _from_rows(self._inner.apply_last_axis(rows, _bounds(bounded)), lead, axis)
 
     __call__ = apply
 

@@ -432,6 +432,27 @@ fn measure<'py>(
     Ok(csr_parts(py, &m))
 }
 
+/// (W, ∂W/∂p) for the kernels' parameter p; see `rebasis.measure_derivative`.
+#[pyfunction]
+#[pyo3(signature = (kernels, basis, normalization, parameter, weight=None))]
+fn measure_derivative<'py>(
+    py: Python<'py>,
+    kernels: Bound<'py, PySpace>,
+    basis: Bound<'py, PySpace>,
+    normalization: &str,
+    parameter: &str,
+    weight: Option<f64>,
+) -> PyResult<(CsrParts<'py>, CsrParts<'py>)> {
+    let norm = self::normalization(normalization)?;
+    let w = self::weight(weight)?;
+    let p = rebasis::Parameter::by_name(parameter).map_err(to_pyerr)?;
+    let (k, b) = (&kernels.get().inner, &basis.get().inner);
+    let (wm, dw) = py
+        .detach(|| rebasis::measure_derivative(k, b, norm, w, p))
+        .map_err(to_pyerr)?;
+    Ok((csr_parts(py, &wm), csr_parts(py, &dw)))
+}
+
 #[pyfunction]
 fn evaluate<'py>(
     py: Python<'py>,
@@ -477,20 +498,37 @@ impl PyProjection {
         self.inner.n_dst()
     }
 
-    /// Projects each row of f, shape (k, n_src), returning (k, n_dst).
-    #[pyo3(signature = (f, bounded=false))]
+    /// Projects each row of f, shape (k, n_src), returning (k, n_dst). `bounds` is None,
+    /// "local", or (lo, hi).
+    #[pyo3(signature = (f, bounds=None))]
     fn apply_last_axis<'py>(
         &self,
         py: Python<'py>,
         f: Bound<'py, PyArray2<f64>>,
-        bounded: bool,
+        bounds: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let g = with_matrix(py, &f, "f", self.inner.n_src(), |v| {
-            if bounded {
-                self.inner.apply_bounded_last_axis(v)
-            } else {
-                self.inner.apply_last_axis(v)
+        let bounds = match bounds {
+            None => None,
+            Some(b) => {
+                if let Ok(s) = b.extract::<String>() {
+                    if s != "local" {
+                        return Err(PyValueError::new_err(format!(
+                            "bounds must be 'local' or (lo, hi), got {s:?}"
+                        )));
+                    }
+                    Some(rebasis::Bounds::Local)
+                } else {
+                    let (lo, hi): (f64, f64) = b.extract()?;
+                    if lo.is_nan() || hi.is_nan() || lo > hi {
+                        return Err(PyValueError::new_err("bounds need lo <= hi"));
+                    }
+                    Some(rebasis::Bounds::Global { lo, hi })
+                }
             }
+        };
+        let g = with_matrix(py, &f, "f", self.inner.n_src(), |v| match bounds {
+            Some(b) => self.inner.apply_bounded_last_axis(v, b),
+            None => self.inner.apply_last_axis(v),
         })?;
         array2(py, g)
     }
@@ -591,6 +629,7 @@ fn _rebasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFit>()?;
     m.add_function(wrap_pyfunction!(inner_products, m)?)?;
     m.add_function(wrap_pyfunction!(measure, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_derivative, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate, m)?)?;
     m.add_function(wrap_pyfunction!(faddeeva_re, m)?)?;
     Ok(())

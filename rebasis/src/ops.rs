@@ -19,7 +19,8 @@ use rayon::prelude::*;
 
 use crate::banded::BandedCholesky;
 use crate::error::{Result, invalid};
-use crate::integrate::{Weight, inner};
+use crate::integrate::{Weight, inner, inner_derivative, integral, integral_derivative};
+use crate::profile::Parameter;
 use crate::space::Space;
 use crate::sparse::Csr;
 
@@ -86,6 +87,76 @@ pub fn measure(
     w
 }
 
+/// The measurement matrix W of [`measure`] and its derivative ∂W/∂p, row i with respect to the
+/// parameter p of kernel i (each kernel has its own parameter, so the Jacobian of g = W f with
+/// respect to the kernels' p is diagonal, with diagonal ∂W/∂p f).
+///
+/// Derivatives are of the kernels as truncated (their supports move with p) and normalized
+/// (`Integral` divides by ∫ K w, `RowSum` by the row sum), so they are the exact derivatives
+/// of what [`measure`] computes. With `Normalization::None` they depend on each profile's
+/// peak normalization (1 at the center).
+pub fn measure_derivative(
+    kernels: &Space,
+    basis: &Space,
+    normalization: Normalization,
+    weight: Weight,
+    p: Parameter,
+) -> Result<(Csr, Csr)> {
+    type Row = (Vec<usize>, Vec<f64>, Vec<f64>, f64, f64);
+    let rows: Vec<Result<Row>> = kernels
+        .elements()
+        .par_iter()
+        .map_init(
+            || (Vec::new(), Vec::new()),
+            |(candidates, knots), k| {
+                let jumps = k.jumps(p)?;
+                basis.candidates(k.lower(), k.upper(), candidates);
+                let mut idx = Vec::with_capacity(candidates.len());
+                let mut val = Vec::with_capacity(candidates.len());
+                let mut der = Vec::with_capacity(candidates.len());
+                for &j in candidates.iter() {
+                    let b = &basis.elements()[j];
+                    let v = inner(k, b, weight, knots);
+                    let d = inner_derivative(k, b, p, weight, &jumps, knots)?;
+                    if v != 0.0 || d != 0.0 {
+                        idx.push(j);
+                        val.push(v);
+                        der.push(d);
+                    }
+                }
+                let (n, dn) = match normalization {
+                    Normalization::Integral => (
+                        integral(k, weight, knots),
+                        integral_derivative(k, p, weight, &jumps, knots)?,
+                    ),
+                    Normalization::RowSum => (val.iter().sum(), der.iter().sum()),
+                    Normalization::None => (1.0, 0.0),
+                };
+                Ok((idx, val, der, n, dn))
+            },
+        )
+        .collect();
+    let mut w_rows = Vec::with_capacity(rows.len());
+    let mut d_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let (idx, val, der, n, dn) = row?;
+        let inv = if n != 0.0 { 1.0 / n } else { 0.0 };
+        // W = A / N, ∂W = (∂A − W ∂N) / N
+        let w: Vec<f64> = val.iter().map(|v| v * inv).collect();
+        let d: Vec<f64> = der
+            .iter()
+            .zip(&w)
+            .map(|(a, wi)| (a - wi * dn) * inv)
+            .collect();
+        w_rows.push((idx.clone(), w));
+        d_rows.push((idx, d));
+    }
+    Ok((
+        Csr::from_rows(kernels.len(), basis.len(), w_rows),
+        Csr::from_rows(kernels.len(), basis.len(), d_rows),
+    ))
+}
+
 /// The matrix E with E f = f(x): the basis functions evaluated at x, shape (len(x), len(basis)).
 pub fn evaluate(basis: &Space, x: &[f64]) -> Result<Csr> {
     Ok(inner_products(&Space::deltas(x)?, basis, Weight::Uniform))
@@ -98,10 +169,21 @@ fn solve_rows(chol: &BandedCholesky, rhs: &mut Array2<f64>) {
         .for_each(|mut row| chol.solve_in_place(row.as_slice_mut().expect("contiguous")));
 }
 
+/// Bounds for [`Projection::apply_bounded_last_axis`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bounds {
+    /// Each output coefficient within the range of the source coefficients it overlaps: no new
+    /// extrema. Meaningful when coefficients are values (boxes, hats, B-splines).
+    Local,
+    /// Every output coefficient in [lo, hi], e.g. lo = 0, hi = ∞ for positivity.
+    Global { lo: f64, hi: f64 },
+}
+
 /// The L2 (Galerkin) projection from `src` onto `dst`, kept factored as G⁻¹ M with G the
 /// (banded) Gram matrix of `dst` and M = ⟨dst, src⟩; G⁻¹ M itself is generally dense.
 #[derive(Debug, Clone)]
 pub struct Projection {
+    gram_matrix: Csr,
     gram: BandedCholesky,
     cross: Csr,
     /// ∫ dst_i w, the mass carried by a unit coefficient.
@@ -110,8 +192,10 @@ pub struct Projection {
 
 impl Projection {
     pub fn new(src: &Space, dst: &Space, weight: Weight) -> Result<Self> {
+        let gram_matrix = gram(dst, weight);
         Ok(Projection {
-            gram: BandedCholesky::factor(&gram(dst, weight))?,
+            gram: BandedCholesky::factor(&gram_matrix)?,
+            gram_matrix,
             cross: inner_products(dst, src, weight),
             dst_mass: dst.integrals(weight),
         })
@@ -144,24 +228,53 @@ impl Projection {
         g
     }
 
-    /// As [`Projection::apply_last_axis`], then limited so that each output coefficient lies
-    /// within the range of the source coefficients it overlaps, with the clipped mass
-    /// redistributed so that Σ g_i ∫ dst_i w is unchanged (clip and assured sum, Bradley et al.
-    /// 2019). Meaningful when coefficients are values: boxes, hats, B-splines.
-    pub fn apply_bounded_last_axis(&self, f: ArrayView2<f64>) -> Array2<f64> {
-        let mut g = self.apply_last_axis(f);
+    /// The best bounded approximation: the coefficients c minimizing the weighted L2 error
+    /// ‖f − Σ c_i dst_i‖ subject to the bounds and to conservation, Σ c_i ∫ dst_i w = Σ g_i
+    /// ∫ dst_i w for the unbounded projection g. Equivalently, c minimizes (c − g)ᵀ G (c − g),
+    /// a quadratic program with a banded Hessian, solved by a primal-dual active-set method.
+    /// Because the error is measured on the function, corrections stay local: clipped mass is
+    /// put back next to where it was removed.
+    pub fn apply_bounded_last_axis(&self, f: ArrayView2<f64>, bounds: Bounds) -> Array2<f64> {
+        let mut rhs = self.cross.apply_last_axis(f);
+        let mut g = rhs.clone();
+        solve_rows(&self.gram, &mut g);
         ndarray::Zip::from(g.axis_iter_mut(Axis(0)))
+            .and(rhs.axis_iter_mut(Axis(0)))
             .and(f.axis_iter(Axis(0)))
-            .par_for_each(|mut gr, fr| {
-                let fr = fr.to_vec();
-                caas(
-                    gr.as_slice_mut().expect("contiguous"),
-                    &fr,
-                    &self.cross,
-                    &self.dst_mass,
-                );
+            .par_for_each(|mut gr, r, fr| {
+                let (lo, hi) = self.bounds(&fr.to_vec(), bounds);
+                let g0 = gr.to_vec();
+                let r = r.to_vec();
+                let c = bounded_least_squares(&self.gram_matrix, &r, &g0, &self.dst_mass, &lo, &hi)
+                    .unwrap_or_else(|| {
+                        let mut c = g0.clone();
+                        caas(&mut c, &self.dst_mass, &lo, &hi);
+                        c
+                    });
+                gr.assign(&ArrayView1::from(&c));
             });
         g
+    }
+
+    /// Per-coefficient bounds for one source vector.
+    fn bounds(&self, f: &[f64], bounds: Bounds) -> (Vec<f64>, Vec<f64>) {
+        let n = self.n_dst();
+        match bounds {
+            Bounds::Global { lo, hi } => (vec![lo; n], vec![hi; n]),
+            Bounds::Local => (0..n)
+                .map(|i| {
+                    let idx = self.cross.row(i).0;
+                    if idx.is_empty() {
+                        (f64::NEG_INFINITY, f64::INFINITY)
+                    } else {
+                        idx.iter()
+                            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &j| {
+                                (a.min(f[j]), b.max(f[j]))
+                            })
+                    }
+                })
+                .unzip(),
+        }
     }
 
     /// The dense matrix G⁻¹ M, shape (n_dst, n_src).
@@ -173,45 +286,146 @@ impl Projection {
     }
 }
 
-/// Clip-and-assured-sum limiter, in place on one projected vector g.
-fn caas(g: &mut [f64], f: &[f64], cross: &Csr, mass: &[f64]) {
+/// min ½ cᵀGc − rᵀc subject to lo <= c <= hi and mᵀc = mᵀg (g = G⁻¹r, the unconstrained
+/// minimizer), by the primal-dual active-set method (Hintermüller, Ito & Kunisch 2002). Returns
+/// None if it does not converge or a reduced system is singular.
+fn bounded_least_squares(
+    gram: &Csr,
+    r: &[f64],
+    g: &[f64],
+    m: &[f64],
+    lo: &[f64],
+    hi: &[f64],
+) -> Option<Vec<f64>> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Free,
+        Lower,
+        Upper,
+    }
     let n = g.len();
-    let mut lo = vec![0.0; n];
-    let mut hi = vec![0.0; n];
+    let target: f64 = m.iter().zip(g).map(|(a, b)| a * b).sum();
+    let diag: Vec<f64> = (0..n)
+        .map(|i| {
+            let (idx, val) = gram.row(i);
+            idx.iter().position(|&j| j == i).map_or(1.0, |k| val[k])
+        })
+        .collect();
+    let mut c: Vec<f64> = (0..n).map(|i| g[i].clamp(lo[i], hi[i])).collect();
+    let mut lambda = vec![0.0; n];
+    let mut state = vec![State::Free; n];
+    // start from the unconstrained solution's violations
+    for i in 0..n {
+        if g[i] > hi[i] {
+            state[i] = State::Upper;
+        } else if g[i] < lo[i] {
+            state[i] = State::Lower;
+        }
+    }
+    for _ in 0..100 {
+        // solve with the active set fixed at its bounds
+        for i in 0..n {
+            match state[i] {
+                State::Lower => c[i] = lo[i],
+                State::Upper => c[i] = hi[i],
+                State::Free => {}
+            }
+        }
+        let free: Vec<usize> = (0..n).filter(|&i| state[i] == State::Free).collect();
+        let mu;
+        if free.is_empty() {
+            mu = 0.0;
+        } else {
+            let sub = gram.submatrix(&free);
+            let chol = BandedCholesky::factor(&sub).ok()?;
+            // a = G_FF⁻¹ (r_F − G_FA c_A), b = G_FF⁻¹ m_F, c_F = a − μ b
+            let mut a: Vec<f64> = free
+                .iter()
+                .map(|&i| {
+                    let (idx, val) = gram.row(i);
+                    let fixed: f64 = idx
+                        .iter()
+                        .zip(val)
+                        .filter(|&(&j, _)| state[j] != State::Free)
+                        .map(|(&j, v)| v * c[j])
+                        .sum();
+                    r[i] - fixed
+                })
+                .collect();
+            let mut b: Vec<f64> = free.iter().map(|&i| m[i]).collect();
+            chol.solve_in_place(&mut a);
+            chol.solve_in_place(&mut b);
+            let mb: f64 = free.iter().zip(&b).map(|(&i, v)| m[i] * v).sum();
+            let ma: f64 = free.iter().zip(&a).map(|(&i, v)| m[i] * v).sum();
+            let fixed_mass: f64 = (0..n)
+                .filter(|&i| state[i] != State::Free)
+                .map(|i| m[i] * c[i])
+                .sum();
+            mu = if mb.abs() > 0.0 {
+                (ma + fixed_mass - target) / mb
+            } else {
+                0.0
+            };
+            for (k, &i) in free.iter().enumerate() {
+                c[i] = a[k] - mu * b[k];
+            }
+        }
+        // multipliers λ = r − G c − μ m on the active set, 0 on the free set
+        for i in 0..n {
+            lambda[i] = if state[i] == State::Free {
+                0.0
+            } else {
+                let (idx, val) = gram.row(i);
+                let gc: f64 = idx.iter().zip(val).map(|(&j, v)| v * c[j]).sum();
+                r[i] - gc - mu * m[i]
+            };
+        }
+        // new active set: λ_i + κ_i (c_i − bound_i) pushes outward
+        let mut changed = false;
+        for i in 0..n {
+            let new = if lo[i] == hi[i] {
+                State::Lower
+            } else if lambda[i] + diag[i] * (c[i] - hi[i]) > 0.0 {
+                State::Upper
+            } else if lambda[i] + diag[i] * (c[i] - lo[i]) < 0.0 {
+                State::Lower
+            } else {
+                State::Free
+            };
+            if new != state[i] {
+                changed = true;
+                state[i] = new;
+            }
+        }
+        if !changed {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// Clip and assured sum (Bradley et al. 2019): clip to [lo, hi], then put the clipped mass
+/// back in proportion to each coefficient's room. A fallback for the active-set solver.
+fn caas(g: &mut [f64], mass: &[f64], lo: &[f64], hi: &[f64]) {
+    let n = g.len();
     let mut deficit = 0.0; // mass removed by clipping
     for i in 0..n {
-        let idx = cross.row(i).0;
-        if idx.is_empty() {
-            // no source overlap: leave as is
-            lo[i] = g[i];
-            hi[i] = g[i];
-            continue;
-        }
-        let (mut a, mut b) = (f64::INFINITY, f64::NEG_INFINITY);
-        for &j in idx {
-            a = a.min(f[j]);
-            b = b.max(f[j]);
-        }
-        lo[i] = a;
-        hi[i] = b;
-        let c = g[i].clamp(a, b);
+        let c = g[i].clamp(lo[i], hi[i]);
         deficit += mass[i] * (g[i] - c);
         g[i] = c;
     }
-    if deficit > 0.0 {
-        let room: f64 = (0..n).map(|i| mass[i] * (hi[i] - g[i])).sum();
-        if room > 0.0 {
-            let r = (deficit / room).min(1.0);
+    let room = |i: usize, up: bool| {
+        let r = if up { hi[i] - g[i] } else { g[i] - lo[i] };
+        if r.is_finite() { r } else { 0.0 }
+    };
+    if deficit != 0.0 {
+        let up = deficit > 0.0;
+        let total: f64 = (0..n).map(|i| mass[i] * room(i, up)).sum();
+        if total > 0.0 {
+            let f = (deficit.abs() / total).min(1.0);
+            let shifts: Vec<f64> = (0..n).map(|i| f * room(i, up)).collect();
             for i in 0..n {
-                g[i] += r * (hi[i] - g[i]);
-            }
-        }
-    } else if deficit < 0.0 {
-        let room: f64 = (0..n).map(|i| mass[i] * (g[i] - lo[i])).sum();
-        if room > 0.0 {
-            let r = (-deficit / room).min(1.0);
-            for i in 0..n {
-                g[i] -= r * (g[i] - lo[i]);
+                g[i] += if up { shifts[i] } else { -shifts[i] };
             }
         }
     }

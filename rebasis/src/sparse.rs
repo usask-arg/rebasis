@@ -203,6 +203,26 @@ impl Csr {
             .sum()
     }
 
+    /// The square submatrix on rows and columns `keep` (increasing), renumbered 0..len.
+    pub fn submatrix(&self, keep: &[usize]) -> Csr {
+        let mut map = vec![usize::MAX; self.ncols.max(self.nrows)];
+        for (k, &i) in keep.iter().enumerate() {
+            map[i] = k;
+        }
+        let rows = keep
+            .iter()
+            .map(|&i| {
+                let (idx, val) = self.row(i);
+                idx.iter()
+                    .zip(val)
+                    .filter(|&(&j, _)| map[j] != usize::MAX)
+                    .map(|(&j, &v)| (map[j], v))
+                    .unzip()
+            })
+            .collect();
+        Csr::from_rows(keep.len(), keep.len(), rows)
+    }
+
     pub fn transpose(&self) -> Csr {
         let mut rows: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); self.ncols];
         for i in 0..self.nrows {

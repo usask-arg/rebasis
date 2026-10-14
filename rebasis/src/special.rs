@@ -37,10 +37,9 @@ fn weideman() -> &'static Weideman {
     })
 }
 
-/// Re w(x + iy) for y >= 0, w the Faddeeva function (Weideman 1994, SIAM J. Numer. Anal. 31).
-///
-/// The Voigt profile is Re w((t + iγ) / (σ√2)) / (σ√(2π)).
-pub fn faddeeva_re(x: f64, y: f64) -> f64 {
+/// w(x + iy) = (Re, Im) for y >= 0, w the Faddeeva function (Weideman 1994, SIAM J. Numer.
+/// Anal. 31).
+pub fn faddeeva(x: f64, y: f64) -> (f64, f64) {
     let w = weideman();
     // z = x + iy; L − iz = (L + y) − ix; L + iz = (L − y) + ix
     let (dr, di) = (w.l + y, -x);
@@ -59,7 +58,35 @@ pub fn faddeeva_re(x: f64, y: f64) -> f64 {
     // 1 / (L − iz) and its square
     let (ir, ii) = (dr / den, -di / den);
     let (sr, si) = (ir * ir - ii * ii, 2.0 * ir * ii);
-    2.0 * (pr * sr - pi * si) + ir / std::f64::consts::PI.sqrt()
+    let inv_sqrt_pi = 1.0 / std::f64::consts::PI.sqrt();
+    (
+        2.0 * (pr * sr - pi * si) + ir * inv_sqrt_pi,
+        2.0 * (pr * si + pi * sr) + ii * inv_sqrt_pi,
+    )
+}
+
+/// Re w(x + iy) for y >= 0. The Voigt profile is Re w((t + iγ) / (σ√2)) / (σ√(2π)).
+pub fn faddeeva_re(x: f64, y: f64) -> f64 {
+    faddeeva(x, y).0
+}
+
+/// w'(z) = −2 z w(z) + 2i/√π, as (Re, Im).
+pub fn faddeeva_derivative(x: f64, y: f64) -> (f64, f64) {
+    let (wr, wi) = faddeeva(x, y);
+    (
+        -2.0 * (x * wr - y * wi),
+        -2.0 * (x * wi + y * wr) + 2.0 / std::f64::consts::PI.sqrt(),
+    )
+}
+
+/// d/dx sin(x)/x.
+#[inline]
+pub fn sinc_derivative(x: f64) -> f64 {
+    if x.abs() < 1e-3 {
+        -x / 3.0 + x * x * x / 30.0
+    } else {
+        (x.cos() - x.sin() / x) / x
+    }
 }
 
 /// erf(b) − erf(a) for a <= b, without cancellation when both are in the same tail.
@@ -83,9 +110,9 @@ pub fn sinc(x: f64) -> f64 {
     }
 }
 
-/// j_n(x) / x^n for n = 0..=4, j_n the spherical Bessel functions. Finite at x = 0, where it is
-/// 1 / (2n + 1)!!.
-pub fn spherical_bessel_over_power(x: f64) -> [f64; 5] {
+/// j_n(x) / x^n for n = 0..=5, j_n the spherical Bessel functions. Finite at x = 0, where it is
+/// 1 / (2n + 1)!!. (d/dx of entry n is −x times entry n + 1.)
+pub fn spherical_bessel_over_power(x: f64) -> [f64; 6] {
     if x.abs() < 4.0 {
         bessel_series(x)
     } else {
@@ -94,8 +121,8 @@ pub fn spherical_bessel_over_power(x: f64) -> [f64; 5] {
 }
 
 /// Σ_k (−x²/2)^k / (k! (2n + 2k + 1)!!)
-fn bessel_series(x: f64) -> [f64; 5] {
-    let mut out = [0.0; 5];
+fn bessel_series(x: f64) -> [f64; 6] {
+    let mut out = [0.0; 6];
     let h = -0.5 * x * x;
     let mut dfact = 1.0; // (2n + 1)!!
     for (n, o) in out.iter_mut().enumerate() {
@@ -115,14 +142,14 @@ fn bessel_series(x: f64) -> [f64; 5] {
 }
 
 /// Upward recurrence from j_0 and j_1, stable for n < x.
-fn bessel_recurrence(x: f64) -> [f64; 5] {
-    let mut out = [0.0; 5];
+fn bessel_recurrence(x: f64) -> [f64; 6] {
+    let mut out = [0.0; 6];
     let (s, c) = x.sin_cos();
     let mut jm1 = s / x;
     let mut j = s / (x * x) - c / x;
     out[0] = jm1;
     out[1] = j / x;
-    for n in 1..4 {
+    for n in 1..5 {
         let jp1 = (2 * n + 1) as f64 / x * j - jm1;
         jm1 = j;
         j = jp1;
@@ -174,11 +201,50 @@ mod tests {
             }
         }
         let z = spherical_bessel_over_power(0.0);
-        assert_eq!(z, [1.0, 1.0 / 3.0, 1.0 / 15.0, 1.0 / 105.0, 1.0 / 945.0]);
+        assert_eq!(
+            z,
+            [
+                1.0,
+                1.0 / 3.0,
+                1.0 / 15.0,
+                1.0 / 105.0,
+                1.0 / 945.0,
+                1.0 / 10395.0
+            ]
+        );
         // j_1(x) = sin x / x² − cos x / x at x = 7
         let x = 7.0f64;
         let j1 = x.sin() / (x * x) - x.cos() / x;
         assert!((spherical_bessel_over_power(x)[1] - j1 / x).abs() < 1e-15);
+    }
+
+    #[test]
+    fn faddeeva_derivative_matches_finite_difference() {
+        for (x, y) in [(0.3, 0.2), (-2.0, 1.5), (5.0, 0.01), (0.0, 3.0)] {
+            let h = 1e-6;
+            let (pr, pi) = faddeeva(x + h, y);
+            let (mr, mi) = faddeeva(x - h, y);
+            let (dr, di) = faddeeva_derivative(x, y);
+            assert!((dr - (pr - mr) / (2.0 * h)).abs() < 1e-8, "{x} {y}");
+            assert!((di - (pi - mi) / (2.0 * h)).abs() < 1e-8, "{x} {y}");
+        }
+    }
+
+    #[test]
+    fn bessel_derivative_identity() {
+        // d/dx (j_n / x^n) = −x j_(n+1) / x^(n+1)
+        for x in [0.5, 3.0, 7.0] {
+            let h = 1e-6;
+            let p = spherical_bessel_over_power(x + h);
+            let m = spherical_bessel_over_power(x - h);
+            let g = spherical_bessel_over_power(x);
+            for n in 0..5 {
+                assert!(
+                    ((p[n] - m[n]) / (2.0 * h) + x * g[n + 1]).abs() < 1e-8,
+                    "x={x} n={n}"
+                );
+            }
+        }
     }
 
     #[test]

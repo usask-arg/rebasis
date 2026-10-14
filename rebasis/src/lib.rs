@@ -26,8 +26,11 @@ pub mod special;
 pub use banded::BandedCholesky;
 pub use element::{Element, Segment, Shape};
 pub use error::{Error, Result};
-pub use integrate::{Weight, inner, integral};
-pub use ops::{Fit, Normalization, Penalty, Projection, evaluate, gram, inner_products, measure};
-pub use profile::{Apodization, FWHM_PER_SIGMA, Profile};
+pub use integrate::{Weight, inner, inner_derivative, integral, integral_derivative};
+pub use ops::{
+    Bounds, Fit, Normalization, Penalty, Projection, evaluate, gram, inner_products, measure,
+    measure_derivative,
+};
+pub use profile::{Apodization, FWHM_PER_SIGMA, Parameter, Profile};
 pub use space::{Interpolation, Space};
 pub use sparse::Csr;

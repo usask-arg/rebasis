@@ -7,6 +7,8 @@
 //! accurate to rounding.
 
 use crate::element::Element;
+use crate::error::Result;
+use crate::profile::Parameter;
 use crate::quadrature::{gl4, gl8, integrate};
 
 /// The weight w(x) of the inner product.
@@ -31,6 +33,14 @@ impl Weight {
         match self {
             Weight::Uniform => 1.0,
             Weight::Cosine { scale } => (scale * x).cos(),
+        }
+    }
+
+    #[inline]
+    pub fn slope(&self, x: f64) -> f64 {
+        match self {
+            Weight::Uniform => 0.0,
+            Weight::Cosine { scale } => -scale * (scale * x).sin(),
         }
     }
 
@@ -67,7 +77,20 @@ fn step_at(elements: &[&Element], weight: Weight, x: f64) -> f64 {
 
 /// ∫ Π elements(x) · w(x) dx over [lo, hi] given the sorted knots inside it (inclusive of lo, hi).
 fn integrate_product(elements: &[&Element], weight: Weight, knots: &[f64]) -> f64 {
-    let f = |x: f64| elements.iter().map(|e| e.evaluate(x)).product::<f64>() * weight.value(x);
+    integrate_with(elements, weight, knots, |x| {
+        elements.iter().map(|e| e.evaluate(x)).product::<f64>()
+    })
+}
+
+/// ∫ g(x) w(x) dx over the knots, with the step control of `elements` (g must be smooth
+/// between knots, on the scale of the elements' profiles).
+fn integrate_with(
+    elements: &[&Element],
+    weight: Weight,
+    knots: &[f64],
+    g: impl Fn(f64) -> f64,
+) -> f64 {
+    let f = |x: f64| g(x) * weight.value(x);
     let smooth = weight == Weight::Uniform && elements.iter().all(|e| e.as_profile().is_none());
     if smooth {
         return knots
@@ -153,6 +176,70 @@ pub fn integral(e: &Element, weight: Weight, knots: &mut Vec<f64>) -> f64 {
     }
     sorted_knots(&[e], e.lower(), e.upper(), knots);
     integrate_product(&[e], weight, knots)
+}
+
+/// ∂/∂p ⟨k, b⟩_w for a parameter p of the kernel k. `jumps` must be `k.jumps(p)`.
+pub fn inner_derivative(
+    k: &Element,
+    b: &Element,
+    p: Parameter,
+    weight: Weight,
+    jumps: &[(f64, f64)],
+    knots: &mut Vec<f64>,
+) -> Result<f64> {
+    if let Element::Delta { x } = k {
+        // ⟨δ_c, b⟩ = b(c) w(c)
+        return Ok(match p {
+            // two deltas: a Kronecker delta, flat in c
+            Parameter::Center => match b {
+                Element::Delta { .. } => 0.0,
+                _ => b.slope(*x) * weight.value(*x) + b.evaluate(*x) * weight.slope(*x),
+            },
+            Parameter::Scale => 0.0,
+            other => {
+                return crate::error::invalid(format!("a delta has no parameter {other:?}"));
+            }
+        });
+    }
+    if let Element::Delta { x } = b {
+        return Ok(k.d_smooth(*x, p)? * weight.value(*x));
+    }
+    let point: f64 = jumps
+        .iter()
+        .filter(|(x, _)| *x >= b.lower() && *x <= b.upper())
+        .map(|(x, a)| a * b.evaluate(*x) * weight.value(*x))
+        .sum();
+    let lo = k.lower().max(b.lower());
+    let hi = k.upper().min(b.upper());
+    if hi <= lo {
+        return Ok(point);
+    }
+    sorted_knots(&[k, b], lo, hi, knots);
+    // d_smooth only errors for an inapplicable parameter, which `jumps` has already rejected
+    let smooth = integrate_with(&[k, b], weight, knots, |x| {
+        k.d_smooth(x, p).unwrap_or(0.0) * b.evaluate(x)
+    });
+    Ok(smooth + point)
+}
+
+/// ∂/∂p ∫ k w for a parameter p of the kernel k. `jumps` must be `k.jumps(p)`.
+pub fn integral_derivative(
+    k: &Element,
+    p: Parameter,
+    weight: Weight,
+    jumps: &[(f64, f64)],
+    knots: &mut Vec<f64>,
+) -> Result<f64> {
+    if let Element::Delta { x } = k {
+        return Ok(match p {
+            Parameter::Center => weight.slope(*x),
+            _ => 0.0,
+        });
+    }
+    let point: f64 = jumps.iter().map(|(x, a)| a * weight.value(*x)).sum();
+    sorted_knots(&[k], k.lower(), k.upper(), knots);
+    let smooth = integrate_with(&[k], weight, knots, |x| k.d_smooth(x, p).unwrap_or(0.0));
+    Ok(smooth + point)
 }
 
 #[cfg(test)]

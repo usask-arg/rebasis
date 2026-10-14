@@ -29,7 +29,7 @@ def regrid(
     dst_kind: str = "boxes",
     weight: Mapping[str, Any] | None = None,
     method: str = "project",
-    bounded: bool = False,
+    bounded=False,
     skipna: bool = False,
     na_thres: float = 0.5,
     **fit_options,

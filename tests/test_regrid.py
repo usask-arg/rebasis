@@ -43,6 +43,29 @@ def test_bounded_projection_has_no_overshoot():
     m = dst.integrals()
     np.testing.assert_allclose(plain @ m, bounded @ m, rtol=1e-13)
     np.testing.assert_allclose(bounded @ m, f @ src.integrals(), rtol=1e-12)
+    # no smearing: coefficients wholly inside the step stay at 1, wholly outside at 0
+    inside = (dst.lower >= 0.3) & (dst.upper <= 0.55)
+    outside = (dst.upper <= 0.3) | (dst.lower >= 0.55)
+    np.testing.assert_allclose(bounded[inside], 1.0, atol=1e-12)
+    np.testing.assert_allclose(bounded[outside], 0.0, atol=1e-12)
+    # and it is the best bounded L2 fit: closer to f than clipping the plain projection
+    xq = x[:-1]
+    err = lambda c: np.sum((dst.evaluate(xq) @ c - f[:-1]) ** 2)  # noqa: E731
+    assert err(bounded) < err(np.clip(plain, 0, 1))
+
+
+def test_positive_and_global_bounds():
+    x = np.linspace(0, 1, 2001)
+    f = np.exp(-(((x - 0.5) / 0.02) ** 2))  # narrow peak: L2 projection rings negative
+    src = rb.Space.hats(x)
+    dst = rb.Space.bsplines_clamped(np.linspace(0, 1, 21), 3)
+    plain = rb.regrid(f, src, dst)
+    assert plain.min() < -1e-3
+    pos = rb.regrid(f, src, dst, bounded="positive")
+    assert pos.min() >= 0
+    np.testing.assert_allclose(pos @ dst.integrals(), plain @ dst.integrals(), rtol=1e-12)
+    box = rb.regrid(f, src, dst, bounded=(0.0, 0.5))
+    assert box.min() >= 0 and box.max() <= 0.5 + 1e-15
 
 
 def test_fit_upsamples_bin_averages_conservatively():
