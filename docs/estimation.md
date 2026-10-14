@@ -194,6 +194,41 @@ print(fit.success, fit.n_iterations, "iterations")
 `fit.estimate(...)` then runs {func}`~rebasis.optimal_estimate` with the fitted covariance,
 mean and nugget.
 
+## xarray
+
+{func}`rebasis.xarray.optimal_estimate` and {func}`rebasis.xarray.fit_covariance` take the
+observations as an xarray object with the observations along one dimension, the form of most
+level-2 satellite files. Coordinates are found by name (`coords` maps a covariance dimension to
+a variable), datetimes become days since `epoch`, target edges may be datetimes, and every other
+dimension of the values (e.g. altitude) is estimated in the same call as a column. A
+{class}`~rebasis.CovarianceFit` brings its mean and nugget along.
+
+```{code-cell} ipython3
+import xarray as xr
+
+import rebasis.xarray
+
+month = np.datetime64("2026-01-01")
+obs = xr.Dataset(
+    {"temperature": ("time", y, {"units": "K"}), "latitude": ("time", lat), "longitude": ("time", lon)},
+    coords={"time": month + (t * 86400).astype("timedelta64[s]")},
+)
+rebasis.xarray.optimal_estimate(
+    obs,
+    {"lat": edges, "lon": [0, 360], "time": [month, month + np.timedelta64(30, "D")]},
+    fit,  # its time lengths and the drift basis are in days since the epoch
+    var="temperature",
+    noise=2.0**2,
+    coords={"lat": "latitude", "lon": "longitude"},
+    epoch=month,
+    target_weight={"lat": "cos_lat_deg"},
+)
+```
+
+The result has the target centers as coordinates, their bounds as `<dim>_bounds`, and the
+estimates, their standard deviations, the prior standard deviations and `n_used` as variables;
+`return_estimate=True` also returns the {class}`~rebasis.Estimate`.
+
 ## Cost and neighbourhoods
 
 The n × n observation covariance is formed in Rust and factored with LAPACK (O(n³)); the

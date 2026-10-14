@@ -17,5 +17,7 @@ uv run --with matplotlib python examples/osiris/figures.py
   exact zonal means: pure sampling error. The covariance (variance, correlation lengths in
   latitude, longitude and time, a nugget) is fitted by maximum likelihood; `--local` fits it per
   band, `--two-scale` adds a large-scale component.
-- `osiris_month.py`: the same estimate for real OSIRIS ozone at one altitude (no truth).
+- `osiris_month.py`: the same estimate for real OSIRIS ozone at one altitude (no truth), with
+  the `rebasis.xarray` front-end straight from the HARMOZ file; writes a netCDF of the
+  estimates.
 - Files are copied to `out/cache` once, because the network shares occasionally fail reads.

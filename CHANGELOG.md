@@ -20,6 +20,10 @@
   `Element::linear_combination` and three-factor inner products in Rust.
 - `Space.harmonics` (cos/sin of a period, e.g. zonal waves) and `Space.bsplines_periodic`
   (B-splines that wrap around a period), exact in every integral, for periodic mean structure.
+- `rebasis.xarray.optimal_estimate` and `rebasis.xarray.fit_covariance`: estimation from
+  observations along one dimension of a Dataset or DataArray, with coordinates by name, datetimes
+  (`numeric_time`) and datetime target edges, other dimensions as columns, and a labelled Dataset
+  of estimates with CF bounds.
 
 ## 0.1.0
 

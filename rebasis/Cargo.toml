@@ -16,4 +16,3 @@ libm = "0.2"
 ndarray = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
-
