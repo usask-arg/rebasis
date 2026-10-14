@@ -37,9 +37,15 @@ Choosing the pieces:
   with family `"squared_exponential"`, `"exponential"`, `"matern32"` or `"matern52"`, a
   correlation length, and optionally a period (longitude). Fit the variance and lengths by
   maximizing {attr}`~rebasis.Estimate.log_likelihood` (see {func}`~rebasis.log_likelihood`).
-- **Mean**: `"estimate"` for an unknown constant, or a dict of spaces for a structured mean
-  that is reproduced exactly. Where data are missing the estimate relaxes towards the mean, so
-  a mean with the field's large-scale structure matters there.
+- **Mean**: `"estimate"` for an unknown constant, a dict of spaces for a structured mean
+  that is reproduced exactly, or a list of {class}`~rebasis.MeanTerm` whose coefficients are
+  either unconstrained or given a Gaussian prior. Where data are missing the estimate relaxes
+  towards the mean, so a mean with the field's large-scale structure matters there; a prior
+  on terms the data only partly determine (a drift through a month sampled in its first half,
+  structure beyond the data's latitudes) keeps them from being extrapolated.
+- **Several quantities at once**: `values` of shape (n, k), e.g. one column per altitude,
+  share the covariance and, for columns with the same valid observations, its factorization.
+  Normalize the columns (e.g. by their means) when one covariance should describe them all.
 
 ## Example: a month of limb-sounder data
 

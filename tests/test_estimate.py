@@ -295,3 +295,100 @@ def test_covariance_sums_add_matrices():
     kk = k(np.array([1.3]), np.array([4.0]), OBS_X, OBS_T)
     assert p.values.ravel()[0] == pytest.approx(beta + (kk @ qi @ (Y - beta))[0], rel=1e-9)
     assert a.values.shape == (2, 1) and np.all(a.std > 0)
+
+
+# ---------------------------------------------------------------- multiple columns, mean priors
+
+TARGETS = {"x": rb.Space.boxes([0.0, 1.5, 3.0, 5.0]), "t": rb.Space.boxes([0.0, 4.0, 10.0])}
+
+
+def _single(y, keep=None, noise=0.05**2, **kw):
+    keep = np.ones(N, bool) if keep is None else keep
+    nz = noise[keep] if np.ndim(noise) else noise
+    return rb.optimal_estimate(
+        y[keep], {"x": OBS_X[keep], "t": OBS_T[keep]}, TARGETS, COV, noise=nz, **kw
+    )
+
+
+def test_columns_sharing_observations_equal_separate_estimates():
+    ys = np.column_stack([Y, 2 * Y - 1, np.sin(OBS_X)])
+    est = rb.optimal_estimate(
+        ys, {"x": OBS_X, "t": OBS_T}, TARGETS, COV, noise=0.05**2, full_covariance=True
+    )
+    assert est.values.shape == (3, 2, 3) and est.weights.shape == (6, N)
+    for j in range(3):
+        one = _single(ys[:, j], full_covariance=True)
+        np.testing.assert_allclose(est.values[..., j], one.values, rtol=1e-12)
+        np.testing.assert_allclose(est.std[..., j], one.std, rtol=1e-12)
+        assert est.log_likelihood[j] == pytest.approx(one.log_likelihood, rel=1e-12)
+        assert est.mean[j] == pytest.approx(one.mean, rel=1e-12)
+    np.testing.assert_allclose(est.apply(ys), est.values, rtol=1e-12)
+    np.testing.assert_allclose(est.covariance, one.covariance, rtol=1e-12)
+
+
+def test_columns_with_different_missing_data_and_noise():
+    rng = np.random.default_rng(3)
+    ys = np.column_stack([Y, Y + 0.3, Y - 0.2])
+    ys[rng.choice(N, 10, replace=False), 1] = np.nan
+    noise = np.full((N, 3), 0.05**2)
+    noise[:, 2] = 0.1**2
+    est = rb.optimal_estimate(ys, {"x": OBS_X, "t": OBS_T}, TARGETS, COV, noise=noise)
+    assert est.weights.shape == (3, 6, N)
+    for j in range(3):
+        keep = np.isfinite(ys[:, j])
+        one = _single(ys[:, j], keep, noise=noise[:, j])
+        np.testing.assert_allclose(est.values[..., j], one.values, rtol=1e-12)
+        np.testing.assert_allclose(est.std[..., j], one.std, rtol=1e-12)
+        assert np.all(est.weights[j][:, ~keep] == 0)
+    np.testing.assert_allclose(est.apply(ys), est.values, rtol=1e-12)
+    ll = rb.log_likelihood(ys, {"x": OBS_X, "t": OBS_T}, COV, noise=noise)
+    np.testing.assert_allclose(ll, est.log_likelihood, rtol=1e-12)
+
+
+def test_finite_prior_mean_term_matches_augmented_covariance():
+    # constant (unconstrained) + a linear drift in t with prior std 0.4 on each hat coefficient
+    hats = rb.Space.hats([0.0, 10.0])
+    mean = [rb.MeanTerm({}), rb.MeanTerm({"t": hats}, prior_std=0.4)]
+    gx, gt = np.array([1.0, 3.5]), np.array([2.0, 8.0])
+    est = rb.optimal_estimate(
+        Y,
+        {"x": OBS_X, "t": OBS_T},
+        {"x": rb.Space.deltas(gx), "t": rb.Space.deltas(gt)},
+        COV,
+        noise=0.05**2,
+        mean=mean,
+    )
+    hp = np.column_stack([1 - OBS_T / 10, OBS_T / 10])
+    xx, tt = np.meshgrid(gx, gt, indexing="ij")
+    hp_t = np.column_stack([1 - tt.ravel() / 10, tt.ravel() / 10])
+    q = kernel(OBS_X, OBS_T, OBS_X, OBS_T) + 0.4**2 * hp @ hp.T + 0.05**2 * np.eye(N)
+    k = kernel(xx.ravel(), tt.ravel(), OBS_X, OBS_T) + 0.4**2 * hp_t @ hp.T
+    qi = np.linalg.inv(q)
+    one = np.ones(N)
+    beta = one @ qi @ Y / (one @ qi @ one)
+    g = beta + k @ qi @ (Y - beta)
+    np.testing.assert_allclose(est.values.ravel(), g, rtol=1e-9)
+    prior = 2.0 + 0.4**2 * np.einsum("mp,mp->m", hp_t, hp_t)
+    r = 1 - k @ qi @ one
+    var = prior - np.einsum("ij,jk,ik->i", k, qi, k) + r**2 / (one @ qi @ one)
+    np.testing.assert_allclose(est.std.ravel(), np.sqrt(var), rtol=1e-7)
+
+
+def test_prior_limits():
+    hats = rb.Space.hats([0.0, 10.0])
+    flat = _single(Y, mean={"t": hats})
+    # the flat limit is approached as (field variance / prior variance); far larger priors only
+    # cost precision in the factorization, which is what prior_std=inf avoids
+    broad = _single(Y, mean=[rb.MeanTerm({"t": hats}, prior_std=1e3)])
+    np.testing.assert_allclose(broad.values, flat.values, rtol=1e-5)
+    zero = _single(Y, mean=[rb.MeanTerm({}), rb.MeanTerm({"t": hats}, prior_std=0.0)])
+    np.testing.assert_allclose(zero.values, _single(Y).values, rtol=1e-12)
+
+
+def test_prior_makes_bases_without_data_usable():
+    # spline functions beyond x = 5 have no data: singular unconstrained, fine with a prior
+    xb = rb.Space.bsplines_clamped(np.linspace(0, 8, 9), 3)
+    with pytest.raises(rb.SingularError, match="prior_std"):
+        _single(Y, mean={"x": xb})
+    est = _single(Y, mean=[rb.MeanTerm({}), rb.MeanTerm({"x": xb}, prior_std=1.0)])
+    assert np.all(np.isfinite(est.values)) and np.all(est.std > 0)

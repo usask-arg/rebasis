@@ -30,6 +30,7 @@ from ._estimate import (
     CovarianceDim,
     CovarianceSum,
     Estimate,
+    MeanTerm,
     log_likelihood,
     optimal_estimate,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "CovarianceSum",
     "Estimate",
     "Fit",
+    "MeanTerm",
     "Projection",
     "SingularError",
     "Space",

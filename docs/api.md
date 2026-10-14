@@ -42,6 +42,8 @@ Estimation
 .. autoclass:: rebasis.Covariance
    :members: replace
 .. autoclass:: rebasis.CovarianceDim
+.. autoclass:: rebasis.CovarianceSum
+.. autoclass:: rebasis.MeanTerm
 .. autofunction:: rebasis.log_likelihood
 
 Errors and constants

@@ -170,110 +170,172 @@ def _grid_atoms(targets: Mapping, names, weight: Mapping | None) -> _Atoms:
     return _Atoms(spaces, [_weight_scale(weight.get(name)) for name in names], shape)
 
 
+@dataclass(frozen=True)
+class MeanTerm:
+    """One term of a structured mean: a tensor product of spaces, constant along dimensions not
+    given (``{}`` is a constant).
+
+    Parameters
+    ----------
+    bases
+        Dimension name -> :class:`Space`.
+    prior_std
+        The prior standard deviation of the term's coefficients (a scalar, or one per
+        coefficient). ``inf`` (the default) leaves them unconstrained: estimated by generalized
+        least squares, and reproduced exactly however the data are sampled. A finite value is a
+        zero-mean Gaussian prior that shrinks coefficients the data do not determine, e.g. a
+        drift through the month where only part of it was sampled, or latitude structure
+        beyond the data. Use ``inf`` rather than a huge finite value for "unconstrained": a
+        finite prior enters the covariance, and one far larger than the field's variance costs
+        precision in its factorization.
+    """
+
+    bases: Mapping[str, Space]
+    prior_std: float | np.ndarray = math.inf
+
+
+def _parse_mean(mean) -> tuple[list[MeanTerm], float | None]:
+    """The mean's terms, or a known constant."""
+    if isinstance(mean, str):
+        if mean != "estimate":
+            msg = f"mean must be 'estimate', a number, a dict of spaces or MeanTerms; got {mean!r}"
+            raise ValueError(msg)
+        return [MeanTerm({})], None
+    if isinstance(mean, MeanTerm):
+        return [mean], None
+    if isinstance(mean, Mapping):
+        return [MeanTerm(dict(mean))], None
+    if isinstance(mean, list | tuple):
+        terms = []
+        for t in mean:
+            if isinstance(t, MeanTerm):
+                terms.append(t)
+            elif isinstance(t, Mapping):
+                terms.append(MeanTerm(dict(t)))
+            elif t == "estimate":
+                terms.append(MeanTerm({}))
+            else:
+                msg = f"mean terms must be MeanTerm or dicts of spaces, got {t!r}"
+                raise ValueError(msg)
+        return terms, None
+    return [], float(mean)
+
+
+def _kernels(coords: Mapping, names) -> dict[str, Space]:
+    return {
+        name: c if isinstance(c, Space) else Space.deltas(np.asarray(c, dtype=np.float64).ravel())
+        for name, c in ((name, coords[name]) for name in names)
+    }
+
+
+def _mean_design(terms, names, kernels, n, targets, target_weight):
+    """H for the observations (n × P), for the target grid (m × P, or None) and the prior
+    standard deviation of each column. A term's values are a row-wise Kronecker product of
+    per-dimension measurements (observations) or a Kronecker product (the target grid)."""
+    target_weight = dict(target_weight or {})
+    h_obs, h_tgt, std = [], [], []
+    for term in terms:
+        unknown = set(term.bases) - set(names)
+        if unknown:
+            msg = f"mean basis for unknown dimensions {sorted(unknown)}"
+            raise ValueError(msg)
+        ho = np.ones((n, 1))
+        ht = np.ones((1, 1))
+        for name in names:
+            basis = term.bases.get(name)
+            if basis is None:
+                if targets is not None:
+                    ht = np.kron(ht, np.ones((len(targets[name]), 1)))
+                continue
+            d = measure(kernels[name], basis).toarray()  # (n, P_d)
+            ho = (ho[:, :, None] * d[:, None, :]).reshape(n, -1)
+            if targets is not None:
+                ht = np.kron(
+                    ht, measure(targets[name], basis, weight=target_weight.get(name)).toarray()
+                )
+        p = ho.shape[1]
+        sd = np.broadcast_to(np.asarray(term.prior_std, dtype=np.float64), (p,))
+        if np.any(sd < 0) or np.any(np.isnan(sd)):
+            msg = "prior standard deviations must be >= 0 (inf: unconstrained)"
+            raise ValueError(msg)
+        h_obs.append(ho)
+        h_tgt.append(ht if targets is not None else None)
+        std.append(sd)
+    if not h_obs:
+        m = None if targets is None else math.prod(len(targets[name]) for name in names)
+        return np.zeros((n, 0)), None if m is None else np.zeros((m, 0)), np.zeros(0)
+    h_t = None if targets is None else np.hstack(h_tgt)
+    return np.hstack(h_obs), h_t, np.concatenate(std)
+
+
 @dataclass
 class Estimate:
-    """The result of :func:`optimal_estimate`. Arrays have the shape of the target grid."""
+    """The result of :func:`optimal_estimate`. Arrays have the shape of the target grid, with a
+    trailing axis of length k when ``values`` had k columns."""
 
     values: np.ndarray
     """The estimates ĝ."""
     std: np.ndarray
-    """Their posterior standard deviations (including the uncertainty of an estimated mean)."""
+    """Their posterior standard deviations (including the uncertainty of the mean)."""
     prior_std: np.ndarray
-    """The prior standard deviations of the targets, for comparison with ``std``."""
-    mean: float
-    """The (estimated or given) constant mean β (NaN for a mean basis; see
-    ``mean_coefficients``)."""
-    log_likelihood: float
-    """log p(y | covariance), restricted (REML, in Harville's basis-independent form) when the
-    mean is estimated; maximize it over the covariance parameters to fit them."""
+    """The prior standard deviations of the targets (from the covariance and the mean terms
+    with finite priors), for comparison with ``std``."""
+    mean: float | np.ndarray
+    """The estimated constant mean β when the mean is a single unconstrained constant (one per
+    column), the known mean if one was given, otherwise NaN; see ``mean_coefficients``."""
+    log_likelihood: float | np.ndarray
+    """log p(y | covariance), one per column; restricted (REML, in Harville's basis-independent
+    form) over the unconstrained mean terms. Maximize it over the covariance parameters to fit
+    them."""
     dims: tuple[str, ...]
     mean_coefficients: np.ndarray | None = None
-    """The estimated coefficients of a mean basis (``mean`` given as spaces)."""
+    """The estimated coefficients of the unconstrained mean terms, shape (P,) or (P, k)."""
     covariance: np.ndarray | None = None
-    """The posterior covariance of the flattened targets, if requested."""
+    """The posterior covariance of the flattened targets, if requested: (m, m), or (k, m, m)
+    when columns have different valid observations."""
     weights: np.ndarray | None = None
-    """W, shape (n_targets, n_observations): ĝ = W y (+ a constant for a known mean). Row m is
-    target m's averaging kernel over the observations; with an estimated mean every row sums
-    to 1."""
+    """W, with ĝ = W y + offset: (m, n), or (k, m, n) when columns have different valid
+    observations (zero weight on invalid ones). Row m is target m's averaging kernel over the
+    observations; it sums to 1 when the mean has an unconstrained constant."""
     offset: np.ndarray | None = None
 
     def apply(self, values) -> np.ndarray:
-        """The same estimator applied to other values at the same observations, e.g. a model
-        field sampled like the data: comparing that with the model's true averages measures
-        the sampling error."""
+        """The same estimator applied to other values at the same observations (shape (n,) or
+        (n, k)), e.g. a model field sampled like the data: comparing that with the model's true
+        averages measures the sampling error."""
         if self.weights is None:
             msg = "the estimate was computed with weights=False"
             raise ValueError(msg)
-        out = self.weights @ np.asarray(values, dtype=np.float64) + self.offset
-        return out.reshape(self.values.shape)
+        v = np.asarray(values, dtype=np.float64)
+        v = np.where(np.isfinite(v), v, 0.0)  # invalid observations carry zero weight
+        if self.weights.ndim == 2:
+            out = self.weights @ v
+            out = out + (self.offset if v.ndim == 1 else self.offset[:, None])
+        else:
+            if v.ndim != 2 or v.shape[1] != self.weights.shape[0]:
+                msg = f"values must have shape (n, {self.weights.shape[0]})"
+                raise ValueError(msg)
+            out = np.einsum("kmn,nk->mk", self.weights, v) + self.offset.T
+        grid = self.prior_std.shape[: len(self.dims)]
+        return out.reshape(*grid, *out.shape[1:])
 
     def weight_histogram(self, coord, edges) -> np.ndarray:
         """Σ of each target's weights over the observations whose coordinate ``coord`` (one value
         per observation) falls in each bin of ``edges``: how the estimate draws on, e.g., each
-        day of the month. Shape: target grid + (len(edges) − 1,)."""
+        day of the month. Shape: target grid (+ k) + (len(edges) − 1,)."""
         if self.weights is None:
             msg = "the estimate was computed with weights=False"
             raise ValueError(msg)
-        coord = np.asarray(coord, dtype=np.float64)
-        b = np.digitize(coord, edges) - 1
+        b = np.digitize(np.asarray(coord, dtype=np.float64), edges) - 1
         nb = len(edges) - 1
-        out = np.zeros((self.weights.shape[0], nb))
-        for k in range(nb):
-            out[:, k] = self.weights[:, b == k].sum(axis=1)
-        return out.reshape(*self.values.shape, nb)
-
-
-def _mean_design(
-    mean_basis: Mapping, names, obs: _Atoms, tgt: _Atoms | None, coords, targets, target_weight
-):
-    """H for the observations (n × P, a row-wise Kronecker product of per-dimension values) and
-    for the target grid (m × P, a Kronecker product), for a mean Σ_p β_p Π_d h_pd(x_d)."""
-    unknown = set(mean_basis) - set(names)
-    if unknown:
-        msg = f"mean basis for unknown dimensions {sorted(unknown)}"
-        raise ValueError(msg)
-    target_weight = dict(target_weight or {})
-    h_obs = np.ones((obs.size, 1))
-    h_tgt = np.ones((1, 1)) if tgt is not None else None
-    for name in names:
-        basis = mean_basis.get(name)
-        if basis is None:
-            continue
-        c = coords[name]
-        kern = c if isinstance(c, Space) else Space.deltas(np.asarray(c, dtype=np.float64).ravel())
-        ho = measure(kern, basis).toarray()  # (n, P_d)
-        h_obs = (h_obs[:, :, None] * ho[:, None, :]).reshape(obs.size, -1)
-    if tgt is not None:
-        for name in names:
-            basis = mean_basis.get(name)
-            if basis is None:
-                ht = np.ones((len(targets[name]), 1))
-            else:
-                ht = measure(targets[name], basis, weight=target_weight.get(name)).toarray()
-            h_tgt = np.kron(h_tgt, ht)
-    return h_obs, h_tgt
-
-
-class _Mean:
-    """The generalized-least-squares mean: β = S⁻¹ Hᵀ Q⁻¹ y, S = Hᵀ Q⁻¹ H."""
-
-    def __init__(self, cf, h, y):
-        self.h = h
-        self.qi_h = linalg.cho_solve(cf, h, check_finite=False)  # (n, P)
-        s = h.T @ self.qi_h
-        try:
-            self.s_cf = linalg.cho_factor(s, lower=True, check_finite=False)
-        except linalg.LinAlgError as e:
-            msg = (
-                "the observations do not determine every mean coefficient: use fewer mean basis "
-                "functions or ones covered by the data"
-            )
-            raise _rebasis.SingularError(msg) from e
-        self.beta = linalg.cho_solve(self.s_cf, self.qi_h.T @ y, check_finite=False)
-        self.logdet_s = 2.0 * np.sum(np.log(np.diag(self.s_cf[0])))
-        # ½ log|HᵀH| makes the restricted likelihood independent of how the mean basis is
-        # parametrized (Harville 1974), so likelihoods compare across mean bases
-        self.logdet_hh = np.linalg.slogdet(h.T @ h)[1]
+        onehot = np.zeros((len(b), nb))
+        ok = (b >= 0) & (b < nb)
+        onehot[np.flatnonzero(ok), b[ok]] = 1.0
+        grid = self.prior_std.shape[: len(self.dims)]
+        if self.weights.ndim == 2:
+            return (self.weights @ onehot).reshape(*grid, nb)
+        out = np.einsum("kmn,nb->mkb", self.weights, onehot)
+        return out.reshape(*grid, self.weights.shape[0], nb)
 
 
 def _factor(q: np.ndarray):
@@ -287,44 +349,117 @@ def _factor(q: np.ndarray):
         raise _rebasis.SingularError(msg) from e
 
 
-def _log_likelihood(cf, r, alpha, mean: _Mean | None) -> float:
-    n = len(r)
+def _solve(y, q, hf, known, b=None, hf_t=None, prior_var=None, prior_cov=None, weights=False):
+    """The estimate for one set of valid observations and k columns of values y (n, k).
+
+    q is the full observation covariance (including noise and the finite-prior mean terms),
+    hf the unconstrained mean columns (n, P_f); b, hf_t, prior_var/prior_cov describe the
+    targets (omitted for the likelihood alone)."""
+    n = y.shape[0]
+    cf = _factor(q)
     logdet = 2.0 * np.sum(np.log(np.diag(cf[0])))
-    ll = -0.5 * float(r @ alpha) - 0.5 * logdet
-    if mean is None:
-        return ll - 0.5 * n * math.log(2 * math.pi)
-    p = mean.h.shape[1]
-    return ll - 0.5 * mean.logdet_s + 0.5 * mean.logdet_hh - 0.5 * (n - p) * math.log(2 * math.pi)
+    pf = hf.shape[1]
+    out = {}
+    if pf:
+        qi_h = linalg.cho_solve(cf, hf, check_finite=False)
+        s = hf.T @ qi_h
+        try:
+            s_cf = linalg.cho_factor(s, lower=True, check_finite=False)
+        except linalg.LinAlgError as e:
+            msg = (
+                "the observations do not determine every unconstrained mean coefficient: give "
+                "those terms a finite prior_std, or use bases covered by the data"
+            )
+            raise _rebasis.SingularError(msg) from e
+        beta = linalg.cho_solve(s_cf, qi_h.T @ y, check_finite=False)  # (P_f, k)
+        r = y - hf @ beta
+        out["beta"] = beta
+    else:
+        r = y - (known or 0.0)
+    alpha = linalg.cho_solve(cf, r, check_finite=False)
+    ll = -0.5 * np.einsum("nk,nk->k", r, alpha) - 0.5 * logdet
+    if pf:
+        logdet_s = 2.0 * np.sum(np.log(np.diag(s_cf[0])))
+        # ½ log|HᵀH| makes the restricted likelihood independent of how the unconstrained mean
+        # is parametrized (Harville 1974)
+        logdet_hh = np.linalg.slogdet(hf.T @ hf)[1]
+        ll += -0.5 * logdet_s + 0.5 * logdet_hh - 0.5 * (n - pf) * math.log(2 * math.pi)
+    else:
+        ll += -0.5 * n * math.log(2 * math.pi)
+    out["ll"] = ll
+    if b is None:
+        return out
+
+    mu_t = hf_t @ out["beta"] if pf else (known or 0.0)
+    out["g"] = mu_t + b @ alpha
+    x = linalg.cho_solve(cf, b.T, check_finite=False)  # Q⁻¹ Bᵀ, (n, m)
+    var = prior_var - np.einsum("mn,nm->m", b, x)
+    if pf:
+        rmat = hf_t - b @ qi_h  # (m, P_f)
+        s_inv_rt = linalg.cho_solve(s_cf, rmat.T, check_finite=False)
+        var += np.einsum("mp,pm->m", rmat, s_inv_rt)
+    out["var"] = var
+    if prior_cov is not None:
+        post = prior_cov - b @ x
+        if pf:
+            post += rmat @ s_inv_rt
+        out["cov"] = post
+    if weights:
+        w = x.T.copy()
+        if pf:
+            # W = B Q⁻¹ + R S⁻¹ Hᵀ Q⁻¹: unbiased for every field in the unconstrained span
+            w += s_inv_rt.T @ qi_h.T
+            out["offset"] = np.zeros(len(out["g"]))
+        else:
+            out["offset"] = (known or 0.0) * (1.0 - w.sum(axis=1))
+        out["w"] = w
+    return out
 
 
-def _parse_mean(mean):
-    """None (known value) / {} (constant) / {dim: Space}, and the known value."""
-    if isinstance(mean, str):
-        if mean != "estimate":
-            msg = f"mean must be 'estimate', a number, or a dict of spaces; got {mean!r}"
+def _columns(values, noise):
+    """Values as (n, k), noise as (n, k), whether there was one column, and the groups of
+    columns sharing the same valid observations and noise."""
+    y = np.asarray(values, dtype=np.float64)
+    single = y.ndim == 1
+    y = y.reshape(len(y), -1)
+    n, k = y.shape
+    nz = np.asarray(noise, dtype=np.float64)
+    if nz.ndim == 2:
+        if nz.shape != (n, k):
+            msg = f"noise must be a scalar, (n,) or (n, k) = {(n, k)}, got {nz.shape}"
             raise ValueError(msg)
-        return {}, None
-    if isinstance(mean, Mapping):
-        return dict(mean), None
-    return None, float(mean)
+    else:
+        nz = np.broadcast_to(nz.reshape(-1, 1) if nz.ndim == 1 else nz, (n, k))
+    if np.any(nz < 0):
+        msg = "noise variances must be >= 0"
+        raise ValueError(msg)
+    valid = np.isfinite(y) & np.isfinite(nz)
+    groups: dict[bytes, list[int]] = {}
+    for j in range(k):
+        key = valid[:, j].tobytes() + np.where(valid[:, j], nz[:, j], 0.0).tobytes()
+        groups.setdefault(key, []).append(j)
+    return y, nz, valid, single, list(groups.values())
 
 
 def log_likelihood(values, coords: Mapping, covariance: Covariance, *, noise, mean="estimate"):
     """log p(y | covariance) without computing any targets; see :attr:`Estimate.log_likelihood`.
-    Cheap enough to maximize over the covariance parameters with ``scipy.optimize``."""
-    y = np.asarray(values, dtype=np.float64).ravel()
-    obs = _observation_atoms(coords, covariance.names, len(y))
-    q = covariance.matrix(obs, obs, symmetric=True)
-    q[np.diag_indices_from(q)] += np.broadcast_to(np.asarray(noise, dtype=np.float64), y.shape)
-    cf = _factor(q)
-    basis, known = _parse_mean(mean)
-    if basis is None:
-        gls, r = None, y - known
-    else:
-        h, _ = _mean_design(basis, covariance.names, obs, None, coords, None, None)
-        gls = _Mean(cf, h, y)
-        r = y - h @ gls.beta
-    return _log_likelihood(cf, r, linalg.cho_solve(cf, r, check_finite=False), gls)
+    Cheap enough to maximize over the covariance parameters with ``scipy.optimize``. ``values``
+    may have k columns (one likelihood each)."""
+    y, nz, valid, single, groups = _columns(values, noise)
+    n = y.shape[0]
+    names = covariance.names
+    obs = _observation_atoms(coords, names, n)
+    terms, known = _parse_mean(mean)
+    h, _, sd = _mean_design(terms, names, _kernels(coords, names), n, None, None)
+    q0 = covariance.matrix(obs, obs, symmetric=True)
+    flat = np.isinf(sd)
+    hp = h[:, ~flat] * sd[~flat]
+    ll = np.empty(y.shape[1])
+    for cols in groups:
+        idx = valid[:, cols[0]]
+        q = q0[np.ix_(idx, idx)] + np.diag(nz[idx, cols[0]]) + hp[idx] @ hp[idx].T
+        ll[cols] = _solve(y[np.ix_(idx, cols)], q, h[idx][:, flat], known)["ll"]
+    return float(ll[0]) if single else ll
 
 
 def optimal_estimate(
@@ -344,7 +479,9 @@ def optimal_estimate(
     Parameters
     ----------
     values
-        The n observations.
+        The n observations, or an (n, k) array of k sets of values at the same observations
+        (e.g. one column per altitude). Columns sharing the same valid (finite) observations
+        and noise share one factorization; NaN marks an invalid observation in a column.
     coords
         For each dimension of ``covariance``: the n observation coordinates (point
         observations), or a :class:`Space` of n elements (each observation an average over its
@@ -356,90 +493,109 @@ def optimal_estimate(
     covariance
         The prior :class:`Covariance`, or a sum of them (:class:`CovarianceSum`).
     noise
-        Observation error variances (scalar or one per observation).
+        Observation error variances: a scalar, one per observation (n,), or (n, k).
     mean
         ``"estimate"`` (default): an unknown constant, estimated by generalized least squares
         (ordinary kriging); every row of the weights then sums to 1, so a constant field is
-        reproduced exactly however it is sampled. A dict ``{dim: Space}``: a mean that is a
-        tensor product of these bases (constant along the other dimensions), with estimated
-        coefficients (universal kriging), e.g. ``{"lat": Space.bsplines_clamped(...),
-        "time": Space.hats([t0, t1])}`` for a latitude structure drifting linearly in time;
-        any field in that span is reproduced exactly. Or a known value.
+        reproduced exactly however it is sampled. A dict ``{dim: Space}``: a tensor-product mean
+        with unconstrained coefficients (universal kriging). A list of :class:`MeanTerm`
+        (and dicts): a sum of terms, each unconstrained or with a Gaussian prior that shrinks
+        coefficients the data do not determine. Or a known value.
     target_weight
         Per dimension, a weight for the target averages, e.g. ``{"lat": "cos_lat_deg"}``.
     weights, full_covariance
-        Also return the weights (n_targets × n) and the posterior covariance of the targets.
+        Also return the weights and the posterior covariance of the targets.
 
     Notes
     -----
-    Cost: the n × n observation covariance is formed and factored (O(n³)), and the posterior
-    variances need one solve per target (O(n² m)); thousands to a few tens of thousands of
-    observations per estimate are practical.
+    Cost: the n × n observation covariance is formed once and factored once per group of
+    columns with the same valid observations (O(n³)); the posterior variances need one solve
+    per target (O(n² m)). Thousands to a few tens of thousands of observations per estimate are
+    practical.
     """
-    y = np.asarray(values, dtype=np.float64).ravel()
-    n = len(y)
+    y, nz, valid, single, groups = _columns(values, noise)
+    n, k = y.shape
     names = covariance.names
     obs = _observation_atoms(coords, names, n)
     tgt = _grid_atoms(targets, names, target_weight)
-    noise = np.broadcast_to(np.asarray(noise, dtype=np.float64), (n,))
-    if np.any(noise < 0) or not np.all(np.isfinite(noise)):
-        msg = "noise variances must be finite and >= 0"
-        raise ValueError(msg)
+    m = tgt.size
+    terms, known = _parse_mean(mean)
+    h, h_t, sd = _mean_design(terms, names, _kernels(coords, names), n, targets, target_weight)
+    flat = np.isinf(sd)
+    # finite-prior mean terms are part of the covariance: Σ_p = diag(sd²)
+    hp, hp_t = h[:, ~flat] * sd[~flat], h_t[:, ~flat] * sd[~flat]
 
-    q = covariance.matrix(obs, obs, symmetric=True)
-    q[np.diag_indices_from(q)] += noise
-    cf = _factor(q)
-    b = covariance.matrix(tgt, obs)  # (m, n)
-
-    basis, known = _parse_mean(mean)
-    if basis is None:
-        gls, h_tgt = None, None
-        mu_obs, mu_tgt = np.full(n, known), np.full(tgt.size, known)
-    else:
-        h_obs, h_tgt = _mean_design(basis, names, obs, tgt, coords, targets, target_weight)
-        gls = _Mean(cf, h_obs, y)
-        mu_obs, mu_tgt = h_obs @ gls.beta, h_tgt @ gls.beta
-    r = y - mu_obs
-    alpha = linalg.cho_solve(cf, r, check_finite=False)
-    g = mu_tgt + b @ alpha
-
-    x = linalg.cho_solve(cf, b.T, check_finite=False)  # Q⁻¹ Bᵀ, (n, m)
+    q0 = covariance.matrix(obs, obs, symmetric=True)
+    b0 = covariance.matrix(tgt, obs) + hp_t @ hp.T
     if full_covariance:
-        prior = covariance.matrix(tgt, tgt, symmetric=True)
-        prior_var = np.diag(prior).copy()
+        prior_cov = covariance.matrix(tgt, tgt, symmetric=True) + hp_t @ hp_t.T
+        prior_var = np.diag(prior_cov).copy()
     else:
-        prior = None
-        prior_var = covariance.diagonal(tgt)
-    var = prior_var - np.einsum("mn,nm->m", b, x)
-    if gls is not None:
-        # the mean's uncertainty: R S⁻¹ Rᵀ, R = H_t − B Q⁻¹ H
-        rmat = h_tgt - b @ gls.qi_h
-        s_inv_rt = linalg.cho_solve(gls.s_cf, rmat.T, check_finite=False)
-        var += np.einsum("mp,pm->m", rmat, s_inv_rt)
+        prior_cov = None
+        prior_var = covariance.diagonal(tgt) + np.einsum("mp,mp->m", hp_t, hp_t)
 
-    est = Estimate(
-        values=g.reshape(tgt.shape),
-        std=np.sqrt(np.maximum(var, 0.0)).reshape(tgt.shape),
-        prior_std=np.sqrt(prior_var).reshape(tgt.shape),
-        mean=float(gls.beta[0])
-        if gls is not None and len(gls.beta) == 1
-        else (known if gls is None else float("nan")),
-        log_likelihood=_log_likelihood(cf, r, alpha, gls),
-        dims=names,
-        mean_coefficients=None if gls is None else gls.beta,
-    )
-    if full_covariance:
-        post = prior - b @ x
-        if gls is not None:
-            post += rmat @ s_inv_rt
-        est.covariance = post
-    if weights:
-        w = x.T.copy()
-        if gls is not None:
-            # W = B Q⁻¹ + R S⁻¹ Hᵀ Q⁻¹: unbiased for every field in the mean's span
-            w += s_inv_rt.T @ gls.qi_h.T
-            est.offset = np.zeros(len(g))
+    g = np.empty((m, k))
+    var = np.empty((m, k))
+    ll = np.empty(k)
+    pf = int(flat.sum())
+    beta = np.full((pf, k), np.nan)
+    one_group = len(groups) == 1
+    cov_out = np.empty((m, m) if one_group else (k, m, m)) if full_covariance else None
+    w_out = np.zeros((m, n) if one_group else (k, m, n)) if weights else None
+    off_out = np.empty(m if one_group else (k, m)) if weights else None
+    for cols in groups:
+        idx = valid[:, cols[0]]
+        q = q0[np.ix_(idx, idx)] + np.diag(nz[idx, cols[0]]) + hp[idx] @ hp[idx].T
+        r = _solve(
+            y[np.ix_(idx, cols)],
+            q,
+            h[idx][:, flat],
+            known,
+            b=b0[:, idx],
+            hf_t=h_t[:, flat],
+            prior_var=prior_var,
+            prior_cov=prior_cov,
+            weights=weights,
+        )
+        g[:, cols] = r["g"]
+        var[:, cols] = r["var"][:, None]
+        ll[cols] = r["ll"]
+        if pf:
+            beta[:, cols] = r["beta"]
+        if one_group:
+            if full_covariance:
+                cov_out[:] = r["cov"]
+            if weights:
+                w_out[:, idx] = r["w"]
+                off_out[:] = r["offset"]
         else:
-            est.offset = known * (1.0 - w.sum(axis=1))
-        est.weights = w
-    return est
+            for j in cols:
+                if full_covariance:
+                    cov_out[j] = r["cov"]
+                if weights:
+                    w_out[j][:, idx] = r["w"]
+                    off_out[j] = r["offset"]
+
+    def shaped(a):
+        a = a.reshape(*tgt.shape, k)
+        return a[..., 0] if single else a
+
+    is_constant = len(terms) == 1 and not terms[0].bases and pf == 1
+    if known is not None:
+        mean_out = known
+    elif is_constant:
+        mean_out = float(beta[0, 0]) if single else beta[0]
+    else:
+        mean_out = float("nan")
+    return Estimate(
+        values=shaped(g),
+        std=shaped(np.sqrt(np.maximum(var, 0.0))),
+        prior_std=np.sqrt(np.maximum(prior_var, 0.0)).reshape(tgt.shape),
+        mean=mean_out,
+        log_likelihood=float(ll[0]) if single else ll,
+        dims=names,
+        mean_coefficients=None if pf == 0 else (beta[:, 0] if single else beta),
+        covariance=cov_out,
+        weights=w_out,
+        offset=off_out,
+    )

@@ -7,6 +7,9 @@
   Matérn ½, 3/2, 5/2 families, periodic dimensions), constant or basis-function means, posterior
   uncertainties, weights and the (REML) log likelihood; `log_likelihood` for fitting.
 - `Space.take`; Matérn profiles in the Rust crate.
+- Estimation: `values` with k columns (shared covariance; one factorization per group of
+  columns with the same valid observations), `MeanTerm` for mean terms with Gaussian priors,
+  and `CovarianceSum` (`Covariance + Covariance`) for multi-scale priors.
 
 ## 0.1.0
 

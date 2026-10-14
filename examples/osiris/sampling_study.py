@@ -27,16 +27,27 @@ EDGES = np.arange(-80.0, 80.0 + 1e-9, 10.0)
 
 LAT_KNOT_SPACING = 30.0
 TWO_SCALE = False
+DRIFT_PRIOR = None  # ppmv over the month; None: an unconstrained linear drift
 
 
 def mean_basis(ndays, lat_range=(-90.0, 90.0)):
-    """A smooth latitude structure (cubic B-splines) drifting linearly through the month."""
+    """A smooth latitude structure (cubic B-splines) drifting linearly through the month.
+
+    With DRIFT_PRIOR set, the latitude structure is unconstrained and the drift (latitude
+    structure × a centred linear function of time) has that prior standard deviation over the
+    month, so where only part of the month was sampled the drift shrinks towards zero instead
+    of being extrapolated."""
     lo, hi = lat_range
     n = max(2, round((hi - lo) / LAT_KNOT_SPACING) + 1)
-    return {
-        "lat": rb.Space.bsplines_clamped(np.linspace(lo, hi, n), 3),
-        "time": rb.Space.hats([0.0, float(ndays)]),
-    }
+    lat = rb.Space.bsplines_clamped(np.linspace(lo, hi, n), 3)
+    if DRIFT_PRIOR is None:
+        return {"lat": lat, "time": rb.Space.hats([0.0, float(ndays)])}
+    t = float(ndays)
+    drift = rb.Space.shifted([t / 2], [-t / 2, t / 2], [-0.5, 0.5])  # (time − t/2) / t
+    return [
+        rb.MeanTerm({"lat": lat}),
+        rb.MeanTerm({"lat": lat, "time": drift}, prior_std=DRIFT_PRIOR),
+    ]
 
 
 def _component(var, l_lat, l_lon, l_time):
@@ -139,6 +150,12 @@ def main():
     ap.add_argument("--out", default=str(Path(__file__).with_name("out")))
     ap.add_argument("--knots", type=float, default=30.0, help="latitude knot spacing of the mean")
     ap.add_argument(
+        "--drift-prior",
+        type=float,
+        default=None,
+        help="prior std of the monthly drift (default: unconstrained)",
+    )
+    ap.add_argument(
         "--two-scale",
         action="store_true",
         help="a small-scale plus a large-scale covariance component",
@@ -151,9 +168,10 @@ def main():
         "with its own fitted covariance (0: one global fit)",
     )
     args = ap.parse_args()
-    global LAT_KNOT_SPACING, TWO_SCALE
+    global LAT_KNOT_SPACING, TWO_SCALE, DRIFT_PRIOR
     LAT_KNOT_SPACING = args.knots
     TWO_SCALE = args.two_scale
+    DRIFT_PRIOR = args.drift_prior
     out = Path(args.out)
     out.mkdir(exist_ok=True)
     ndays = days_in_month(args.year, args.month)
