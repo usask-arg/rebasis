@@ -35,7 +35,11 @@ Choosing the pieces:
 
 - **Covariance** ({class}`~rebasis.Covariance`): per dimension a {class}`~rebasis.CovarianceDim`
   with family `"squared_exponential"`, `"exponential"`, `"matern32"` or `"matern52"`, a
-  correlation length, and optionally a period (longitude). Fit the variance and lengths by
+  correlation length, optionally a period (longitude), and optionally a
+  {class}`~rebasis.VarianceProfile` s(x) (a spline) for variability that changes along the
+  dimension, e.g. peaking at a polar vortex edge: the covariance becomes s(x) s(x') ρ(x − x'),
+  still integrated exactly. Sums of covariances ({class}`~rebasis.CovarianceSum`) combine
+  scales. Fit the variance and lengths by
   maximizing {attr}`~rebasis.Estimate.log_likelihood` (see {func}`~rebasis.log_likelihood`).
 - **Mean**: `"estimate"` for an unknown constant, a dict of spaces for a structured mean
   that is reproduced exactly, or a list of {class}`~rebasis.MeanTerm` whose coefficients are

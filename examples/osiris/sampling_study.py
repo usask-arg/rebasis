@@ -27,6 +27,7 @@ EDGES = np.arange(-80.0, 80.0 + 1e-9, 10.0)
 
 LAT_KNOT_SPACING = 30.0
 TWO_SCALE = False
+LAT_PROFILE = False
 DRIFT_PRIOR = None  # ppmv over the month; None: an unconstrained linear drift
 
 
@@ -118,10 +119,22 @@ def fit_with_rebasis(y, coords, ndays, lat_range, n_sub=1500):
     global DRIFT_PRIOR
     DRIFT_PRIOR = DRIFT_PRIOR or 0.1
     v = float(np.var(y))
+    start = _component(v, 10.0, 60.0, 5.0)
+    if LAT_PROFILE:
+        # the standard deviation as a smooth function of latitude (the variance is then 1)
+        lo, hi = lat_range
+        basis = rb.Space.bsplines_clamped(np.linspace(lo, hi, round((hi - lo) / 30) + 1), 3)
+        profile = rb.VarianceProfile(basis, np.full(len(basis), np.sqrt(v)))
+        start = rb.Covariance(
+            1.0,
+            lat=rb.CovarianceDim("squared_exponential", 10.0, variance_profile=profile),
+            lon=rb.CovarianceDim("exponential", 60.0, period=360.0),
+            time=rb.CovarianceDim("matern32", 5.0),
+        )
     return rb.fit_covariance(
         y,
         coords,
-        _component(v, 10.0, 60.0, 5.0),
+        start,
         noise=0.0,
         mean=mean_basis(ndays, lat_range),
         nugget=0.01 * v,
@@ -172,6 +185,11 @@ def main():
         help="fit everything, the drift prior included, with rebasis.fit_covariance",
     )
     ap.add_argument(
+        "--lat-profile",
+        action="store_true",
+        help="with --fit-prior: a fitted variance profile in latitude",
+    )
+    ap.add_argument(
         "--drift-prior",
         type=float,
         default=None,
@@ -190,10 +208,11 @@ def main():
         "with its own fitted covariance (0: one global fit)",
     )
     args = ap.parse_args()
-    global LAT_KNOT_SPACING, TWO_SCALE, DRIFT_PRIOR
+    global LAT_KNOT_SPACING, TWO_SCALE, DRIFT_PRIOR, LAT_PROFILE
     LAT_KNOT_SPACING = args.knots
     TWO_SCALE = args.two_scale
     DRIFT_PRIOR = args.drift_prior
+    LAT_PROFILE = args.lat_profile
     out = Path(args.out)
     out.mkdir(exist_ok=True)
     ndays = days_in_month(args.year, args.month)
@@ -230,6 +249,14 @@ def main():
             f"{p['length.lon']:.0f}°, t {p['length.time']:.1f} d), drift prior "
             f"{p['mean.1.prior_std']:.3f}, nugget σ {np.sqrt(fit.nugget):.3f}"
         )
+        if LAT_PROFILE:
+            s = fit.covariance.dims["lat"].variance_profile
+            grid = np.arange(-75.0, 80.0, 15.0)
+            grid = grid[(grid >= coverage(lat)[0]) & (grid <= coverage(lat)[1])]
+            print(
+                "  fitted σ(lat): "
+                + ", ".join(f"{g:.0f}°: {v:.2f}" for g, v in zip(grid, s(grid), strict=True))
+            )
     else:
         theta, _ll = fit_covariance(y, coords, ndays, lat_range=coverage(lat))
         noise = float(np.exp(theta[-1]))
@@ -274,7 +301,15 @@ def main():
         f"{rms(g - truth):.3f} ppmv; truth within 2σ in "
         f"{np.sum(np.abs(g - truth) < 2 * s)}/{np.sum(covered)} covered bands"
     )
-    model = "fitted_prior" if args.fit_prior else "two_scale" if TWO_SCALE else "global"
+    model = (
+        "lat_profile"
+        if LAT_PROFILE
+        else "fitted_prior"
+        if args.fit_prior
+        else "two_scale"
+        if TWO_SCALE
+        else "global"
+    )
     np.savez(
         out / f"sampling_{model}_{args.year}{args.month:02d}_{args.pressure:g}hPa.npz",
         edges=EDGES,

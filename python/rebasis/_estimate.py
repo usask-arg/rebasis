@@ -29,6 +29,27 @@ from ._space import Space
 FAMILIES = ("squared_exponential", "exponential", "matern32", "matern52")
 
 
+@dataclass(frozen=True, eq=False)
+class VarianceProfile:
+    """A variance that varies along a dimension: s(x) = Σ_i c_i B_i(x), so that the covariance
+    along it is s(x) s(x') ρ(x − x'). With B-spline bases and positive coefficients s stays
+    positive. The basis must cover every coordinate it is used at (s is 0 outside it)."""
+
+    basis: Space
+    coefficients: np.ndarray
+
+    def __post_init__(self):
+        c = np.ascontiguousarray(np.asarray(self.coefficients, dtype=np.float64).ravel())
+        if len(c) != len(self.basis):
+            msg = f"{len(c)} coefficients for {len(self.basis)} basis functions"
+            raise ValueError(msg)
+        object.__setattr__(self, "coefficients", c)
+
+    def __call__(self, x) -> np.ndarray:
+        """s at x."""
+        return self.basis.evaluate(x) @ self.coefficients
+
+
 @dataclass(frozen=True)
 class CovarianceDim:
     """The correlation function along one dimension.
@@ -42,11 +63,15 @@ class CovarianceDim:
         The correlation length ℓ, in the units of the coordinate.
     period
         For periodic coordinates such as longitude (e.g. 360): correlations wrap around.
+    variance_profile
+        A :class:`VarianceProfile` s: the covariance along this dimension becomes
+        s(x) s(x') ρ(x − x'), e.g. a variability that peaks at the polar vortex edge.
     """
 
     family: str
     length: float
     period: float | None = None
+    variance_profile: VarianceProfile | None = None
 
     def __post_init__(self):
         if self.family not in FAMILIES and self.family not in ("gaussian", "matern12"):
@@ -55,7 +80,9 @@ class CovarianceDim:
 
     def _spec(self):
         period = None if self.period is None else float(self.period)
-        return (self.family, float(self.length), period)
+        vp = self.variance_profile
+        profile = None if vp is None else (vp.basis._inner, vp.coefficients.tolist())
+        return (self.family, float(self.length), period, profile)
 
 
 class Covariance:

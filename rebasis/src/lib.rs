@@ -27,7 +27,7 @@ pub mod special;
 
 pub use banded::BandedCholesky;
 pub use coordinate::CoordinateMap;
-pub use covariance::{Atoms, Covariance1d, Family, ProductCovariance};
+pub use covariance::{Atoms, Covariance1d, Family, ProductCovariance, VarianceProfile};
 pub use element::{Element, Segment, Shape};
 pub use error::{Error, Result};
 pub use integrate::{Weight, inner, inner_derivative, integral, integral_derivative};

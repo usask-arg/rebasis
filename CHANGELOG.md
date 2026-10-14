@@ -15,6 +15,9 @@
 - `fit_covariance`: maximum (restricted) likelihood for variances, correlation lengths, a nugget
   and mean-term prior widths, with analytic gradients from exact length derivatives of the
   covariances (`ProductCovariance::matrix_with_length_derivatives` in Rust).
+- `VarianceProfile`: a spline standard deviation along a covariance dimension (non-stationary
+  variance), with exact covariances and exact gradients for fitting its coefficients;
+  `Element::linear_combination` and three-factor inner products in Rust.
 
 ## 0.1.0
 

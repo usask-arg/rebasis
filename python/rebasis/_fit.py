@@ -16,6 +16,7 @@ from ._estimate import (
     CovarianceSum,
     Estimate,
     MeanTerm,
+    VarianceProfile,
     _kernels,
     _mean_design,
     _observation_atoms,
@@ -162,6 +163,19 @@ def fit_covariance(
             params.append(
                 _Param(f"{pre}length.{dim}", cd.length, 1e-2 * cd.length, 1e2 * cd.length)
             )
+        has_profile = False
+        for dim, cd in comp.dims.items():
+            if cd.variance_profile is None:
+                continue
+            has_profile = True
+            for j, cj in enumerate(cd.variance_profile.coefficients):
+                if not cj > 0:
+                    msg = f"profile coefficients must be > 0 to be fitted ({dim}, {j})"
+                    raise ValueError(msg)
+                params.append(_Param(f"{pre}profile.{dim}.{j}", float(cj), 1e-3 * cj, 1e3 * cj))
+        if has_profile:
+            # σ² and the profile's scale are interchangeable: hold σ² fixed
+            fixed = set(fixed) | {f"{pre}variance"}
     for i, _, sd in finite:
         s0 = float(np.max(sd)) if np.max(sd) > 0 else 1.0
         params.append(_Param(f"mean.{i}.prior_std", s0, 1e-4 * s0, 1e4 * s0))
@@ -190,10 +204,13 @@ def fit_covariance(
         out = []
         for ci, comp in enumerate(comps):
             pre = f"{ci}." if multi else ""
-            dims = {
-                dim: CovarianceDim(cd.family, vals[f"{pre}length.{dim}"], cd.period)
-                for dim, cd in comp.dims.items()
-            }
+            dims = {}
+            for dim, cd in comp.dims.items():
+                vp = cd.variance_profile
+                if vp is not None:
+                    coeffs = [vals[f"{pre}profile.{dim}.{j}"] for j in range(len(vp.basis))]
+                    vp = VarianceProfile(vp.basis, coeffs)
+                dims[dim] = CovarianceDim(cd.family, vals[f"{pre}length.{dim}"], cd.period, vp)
             out.append(Covariance(vals[f"{pre}variance"], **dims))
         return out
 
@@ -206,10 +223,10 @@ def fit_covariance(
         mats = []
         q = np.diag(nz + (vals["nugget"] if fit_nugget else fixed_nugget))
         for c in comps_v:
-            k, g = _rebasis.covariance_length_derivatives(
+            k, g, gp = _rebasis.covariance_length_derivatives(
                 c.variance, c._spec(), obs.spaces, obs.weights
             )
-            mats.append((k, g))
+            mats.append((k, g, gp))
             q += k
         prior_terms = []
         for i, h, sd in finite:
@@ -253,11 +270,13 @@ def fit_covariance(
             return 0.5 * (alpha @ dq @ alpha - np.sum(pmat * dq))
 
         grads = {}
-        for ci, (k, g) in enumerate(mats):
+        for ci, (k, g, gp) in enumerate(mats):
             pre = f"{ci}." if multi else ""
             grads[f"{pre}variance"] = half(k)
-            for (dim, _), gd in zip(comps[ci].dims.items(), g, strict=True):
+            for (dim, _), gd, gpd in zip(comps[ci].dims.items(), g, gp, strict=True):
                 grads[f"{pre}length.{dim}"] = half(gd)
+                for j, gj in enumerate(gpd):
+                    grads[f"{pre}profile.{dim}.{j}"] = half(gj)
         for (i, _, _), hs in zip(finite, prior_terms, strict=True):
             # Q contains s² H D Hᵀ: ∂/∂log s = 2 H_s H_sᵀ
             hta = hs.T @ alpha

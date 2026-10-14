@@ -80,7 +80,7 @@ fn bspline_value(t: &[f64], i: usize, d: usize, x: f64) -> f64 {
 }
 
 /// Coefficients q of the degree-d polynomial through (s_k, v_k), by Gaussian elimination.
-fn fit_polynomial(s: &[f64], v: &[f64]) -> [f64; 4] {
+pub(crate) fn fit_polynomial(s: &[f64], v: &[f64]) -> [f64; 4] {
     let n = s.len();
     let mut a = [[0.0; 5]; 4];
     for r in 0..n {

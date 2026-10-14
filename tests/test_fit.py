@@ -140,3 +140,89 @@ def test_estimate_with_the_fit_and_options():
     np.testing.assert_allclose(a.values, b.values)
     with pytest.raises(ValueError, match="unknown parameters"):
         rb.fit_covariance(Y, COORDS, cov, noise=0.01, fixed={"length.z"})
+
+
+# ------------------------------------------------------------------------- variance profiles
+
+PBASIS = rb.Space.bsplines_clamped(np.linspace(-1.0, 6.0, 5), 3)
+PCOEF = np.array([0.4, 0.6, 1.0, 1.8, 2.5, 3.0, 2.0])
+
+
+def profiled(coeffs=PCOEF, lx=0.8, lt=2.0):
+    return rb.Covariance(
+        1.0,
+        x=rb.CovarianceDim(
+            "squared_exponential", lx, variance_profile=rb.VarianceProfile(PBASIS, coeffs)
+        ),
+        t=rb.CovarianceDim("matern32", lt),
+    )
+
+
+def test_profiled_estimate_matches_independent_kriging():
+    s = rb.VarianceProfile(PBASIS, PCOEF)
+
+    def k(x1, t1, x2, t2):
+        u = np.sqrt(3) * np.abs(t1[:, None] - t2[None, :]) / 2.0
+        rho = np.exp(-((x1[:, None] - x2[None, :]) ** 2) / (2 * 0.8**2)) * (1 + u) * np.exp(-u)
+        return s(x1)[:, None] * s(x2)[None, :] * rho
+
+    gx, gt = np.array([0.5, 2.5, 4.5]), np.array([3.0])
+    est = rb.optimal_estimate(
+        Y, COORDS, {"x": rb.Space.deltas(gx), "t": rb.Space.deltas(gt)}, profiled(), noise=0.01
+    )
+    q = k(X, T, X, T) + 0.01 * np.eye(N)
+    kk = k(gx, np.full(3, 3.0), X, T)
+    qi = np.linalg.inv(q)
+    one = np.ones(N)
+    beta = one @ qi @ Y / (one @ qi @ one)
+    np.testing.assert_allclose(est.values.ravel(), beta + kk @ qi @ (Y - beta), rtol=1e-9)
+    # a box average is the limit of point averages
+    xs = np.linspace(1.0, 3.0, 2001)
+    box = rb.optimal_estimate(
+        Y,
+        COORDS,
+        {"x": rb.Space.boxes([1.0, 3.0]), "t": rb.Space.deltas(gt)},
+        profiled(),
+        noise=0.01,
+    )
+    pts = rb.optimal_estimate(
+        Y, COORDS, {"x": rb.Space.deltas(xs), "t": rb.Space.deltas(gt)}, profiled(), noise=0.01
+    )
+    assert box.values[0, 0] == pytest.approx(np.trapezoid(pts.values[:, 0], xs) / 2.0, abs=1e-7)
+
+
+def test_profile_gradient_matches_finite_differences(monkeypatch):
+    fun, theta0, fit = capture_objective(
+        monkeypatch, covariance=profiled(), noise=0.01, nugget=0.02
+    )
+    # a component with a profile holds its variance fixed (it only scales the profile)
+    assert fit.parameters["variance"] == 1.0
+    assert {f"profile.x.{j}" for j in range(len(PCOEF))} <= set(fit.parameters)
+    theta = theta0 + RNG.normal(0, 0.1, len(theta0))
+    _, g = fun(theta)
+    for i in range(len(theta)):
+        e = np.zeros_like(theta)
+        e[i] = 1e-5
+        fd = (fun(theta + e)[0] - fun(theta - e)[0]) / 2e-5
+        assert g[i] == pytest.approx(fd, rel=1e-5, abs=1e-6), i
+
+
+def test_fitted_profile_follows_the_variability():
+    rng = np.random.default_rng(8)
+    n = 700
+    x, t = rng.uniform(0, 5, n), rng.uniform(0, 20, n)
+    truth = profiled(coeffs=np.array([0.3, 0.3, 0.5, 1.0, 2.0, 3.0, 3.0]), lx=0.6, lt=3.0)
+    obs = rb._estimate._observation_atoms({"x": x, "t": t}, truth.names, n)
+    cov = truth.matrix(obs, obs, symmetric=True) + 0.01 * np.eye(n)
+    y = np.linalg.cholesky(cov) @ rng.normal(size=n)
+    start = profiled(coeffs=np.ones(len(PCOEF)), lx=1.0, lt=5.0)
+    fit = rb.fit_covariance(y, {"x": x, "t": t}, start, noise=0.01, fit_nugget=False)
+    assert fit.success, fit.message
+    s = fit.covariance.dims["x"].variance_profile
+    # a ten-fold rise in standard deviation across the domain is recovered within ~40 %
+    ratio = s(np.array([4.5]))[0] / s(np.array([0.5]))[0]
+    true_ratio = (
+        truth.dims["x"].variance_profile(np.array([4.5]))[0]
+        / truth.dims["x"].variance_profile(np.array([0.5]))[0]
+    )
+    assert ratio == pytest.approx(true_ratio, rel=0.4)

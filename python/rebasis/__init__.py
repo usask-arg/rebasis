@@ -31,6 +31,7 @@ from ._estimate import (
     CovarianceSum,
     Estimate,
     MeanTerm,
+    VarianceProfile,
     log_likelihood,
     optimal_estimate,
 )
@@ -78,6 +79,7 @@ __all__ = [
     "Projection",
     "SingularError",
     "Space",
+    "VarianceProfile",
     "apply_along",
     "evaluate",
     "faddeeva_re",

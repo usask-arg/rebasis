@@ -477,6 +477,64 @@ impl Element {
         }
     }
 
+    /// Σ_i c_i φ_i for piecewise-polynomial elements (boxes, hats, B-splines, tabulated shapes),
+    /// as one piecewise-cubic element: on each interval between the union of their knots the
+    /// sum is a cubic, fitted exactly from four values.
+    pub fn linear_combination(elements: &[Element], coeffs: &[f64]) -> Result<Element> {
+        if elements.is_empty() || elements.len() != coeffs.len() {
+            return invalid("a linear combination needs one coefficient per element");
+        }
+        if elements
+            .iter()
+            .any(|e| !e.is_polynomial() || matches!(e, Element::Delta { .. }))
+        {
+            return invalid("a linear combination needs piecewise-polynomial elements");
+        }
+        if coeffs.iter().any(|c| !c.is_finite()) {
+            return invalid("coefficients must be finite");
+        }
+        let lo = elements
+            .iter()
+            .map(Element::lower)
+            .fold(f64::INFINITY, f64::min);
+        let hi = elements
+            .iter()
+            .map(Element::upper)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut knots = vec![lo, hi];
+        for e in elements {
+            knots.push(e.lower());
+            knots.push(e.upper());
+            e.push_knots(lo, hi, &mut knots);
+        }
+        knots.sort_unstable_by(f64::total_cmp);
+        knots.dedup();
+        let s = [0.125, 0.375, 0.625, 0.875];
+        let mut segments = Vec::with_capacity(knots.len());
+        for w in knots.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let h = b - a;
+            let v: Vec<f64> = s
+                .iter()
+                .map(|t| {
+                    let x = a + t * h;
+                    elements
+                        .iter()
+                        .zip(coeffs)
+                        .map(|(e, c)| c * e.evaluate(x))
+                        .sum()
+                })
+                .collect();
+            let q = crate::space::fit_polynomial(&s, &v);
+            segments.push(Segment {
+                a,
+                b,
+                coeffs: [q[0], q[1] / h, q[2] / (h * h), q[3] / (h * h * h)],
+            });
+        }
+        Element::piecewise(Arc::new(Shape::new(segments)?), 0.0, 1.0)
+    }
+
     /// The `order`-th derivative of a piecewise-polynomial element, excluding the point masses
     /// at its jumps (so the derivative of a box is zero). Errors for deltas and profiles.
     pub fn derivative(&self, order: usize) -> Result<Element> {
@@ -840,6 +898,23 @@ mod tests {
         for k in 0..400 {
             let v = s.evaluate(k as f64 * 0.01);
             assert!((-1e-15..=1.0 + 1e-15).contains(&v));
+        }
+    }
+
+    #[test]
+    fn linear_combination_of_bsplines() {
+        let sp = crate::space::Space::bsplines_clamped(&[0.0, 0.7, 1.5, 3.0], 3).unwrap();
+        let c = [1.0, 2.0, 0.5, 3.0, 1.5, 0.8];
+        let e = Element::linear_combination(sp.elements(), &c).unwrap();
+        for k in 0..60 {
+            let x = k as f64 * 0.05;
+            let direct: f64 = sp
+                .elements()
+                .iter()
+                .zip(&c)
+                .map(|(b, ci)| ci * b.evaluate(x))
+                .sum();
+            assert!((e.evaluate(x) - direct).abs() < 1e-13, "{x}");
         }
     }
 
