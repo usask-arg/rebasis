@@ -28,6 +28,7 @@ from . import _rebasis
 from ._estimate import (
     Covariance,
     CovarianceDim,
+    CovarianceSum,
     Estimate,
     log_likelihood,
     optimal_estimate,
@@ -67,6 +68,7 @@ __all__ = [
     "PARAMETERS",
     "Covariance",
     "CovarianceDim",
+    "CovarianceSum",
     "Estimate",
     "Fit",
     "Projection",

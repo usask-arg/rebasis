@@ -96,6 +96,39 @@ class Covariance:
     def diagonal(self, a: _Atoms) -> np.ndarray:
         return _rebasis.covariance_diagonal(self.variance, self._spec(), a.spaces, a.weights)
 
+    def __add__(self, other: Covariance | CovarianceSum) -> CovarianceSum:
+        return CovarianceSum(self) + other
+
+
+class CovarianceSum:
+    """A sum of separable covariances over the same dimensions, e.g. a small-scale and a
+    large-scale component: ``Covariance(...) + Covariance(...)``. Each component is computed
+    exactly; the sum is not separable."""
+
+    def __init__(self, *components: Covariance):
+        if not components:
+            msg = "a covariance sum needs at least one component"
+            raise ValueError(msg)
+        names = components[0].names
+        if any(c.names != names for c in components):
+            msg = "every component must have the same dimensions, in the same order"
+            raise ValueError(msg)
+        self.components = list(components)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return self.components[0].names
+
+    def __add__(self, other: Covariance | CovarianceSum) -> CovarianceSum:
+        more = other.components if isinstance(other, CovarianceSum) else [other]
+        return CovarianceSum(*self.components, *more)
+
+    def matrix(self, a: _Atoms, b: _Atoms, symmetric: bool = False) -> np.ndarray:
+        return sum(c.matrix(a, b, symmetric) for c in self.components)
+
+    def diagonal(self, a: _Atoms) -> np.ndarray:
+        return sum(c.diagonal(a) for c in self.components)
+
 
 @dataclass
 class _Atoms:
@@ -321,7 +354,7 @@ def optimal_estimate(
         product (e.g. ``{"lat": Space.boxes(lat_edges), "lon": Space.boxes([0, 360]),
         "time": Space.boxes(month_edges)}`` for monthly zonal means).
     covariance
-        The prior :class:`Covariance`.
+        The prior :class:`Covariance`, or a sum of them (:class:`CovarianceSum`).
     noise
         Observation error variances (scalar or one per observation).
     mean

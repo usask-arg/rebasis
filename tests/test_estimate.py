@@ -256,3 +256,42 @@ def test_fields_in_the_mean_span_are_reproduced_exactly():
     y2 = a(OBS_X) * 2 - 0.1 * OBS_T
     truth2 = 2 * (np.array(truth) - 0.3 * 5.5) - 0.1 * 5.5
     np.testing.assert_allclose(est.apply(y2)[:, 0], truth2, atol=1e-7)
+
+
+def test_covariance_sums_add_matrices():
+    short = rb.Covariance(
+        1.0, x=rb.CovarianceDim("exponential", 0.5), t=rb.CovarianceDim("matern32", 1.0)
+    )
+    long = rb.Covariance(
+        0.5, x=rb.CovarianceDim("squared_exponential", 3.0), t=rb.CovarianceDim("matern52", 8.0)
+    )
+    total = short + long
+    targets = {"x": rb.Space.boxes([0.0, 2.5, 5.0]), "t": rb.Space.boxes([0.0, 10.0])}
+    a = rb.optimal_estimate(
+        Y, {"x": OBS_X, "t": OBS_T}, targets, total, noise=0.01, full_covariance=True
+    )
+
+    # reference: point covariances of the sum, written out
+    def k(x1, t1, x2, t2):
+        dx = np.abs(x1[:, None] - x2[None, :])
+        dt = np.abs(t1[:, None] - t2[None, :])
+        u1, u2 = np.sqrt(3) * dt / 1.0, np.sqrt(5) * dt / 8.0
+        return np.exp(-dx / 0.5) * (1 + u1) * np.exp(-u1) + 0.5 * np.exp(-(dx**2) / 18.0) * (
+            1 + u2 + u2**2 / 3
+        ) * np.exp(-u2)
+
+    q = k(OBS_X, OBS_T, OBS_X, OBS_T) + 0.01 * np.eye(N)
+    # one point target, to compare with closed forms
+    p = rb.optimal_estimate(
+        Y,
+        {"x": OBS_X, "t": OBS_T},
+        {"x": rb.Space.deltas([1.3]), "t": rb.Space.deltas([4.0])},
+        total,
+        noise=0.01,
+    )
+    qi = np.linalg.inv(q)
+    one = np.ones(N)
+    beta = one @ qi @ Y / (one @ qi @ one)
+    kk = k(np.array([1.3]), np.array([4.0]), OBS_X, OBS_T)
+    assert p.values.ravel()[0] == pytest.approx(beta + (kk @ qi @ (Y - beta))[0], rel=1e-9)
+    assert a.values.shape == (2, 1) and np.all(a.std > 0)
