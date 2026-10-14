@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+Estimation: optimal (kriging) estimates of averages from sparse, irregular samples, with
+covariance fitting, and an xarray front-end.
 
 - `optimal_estimate`: kriging estimates of grid averages from irregular observations, with
   exact covariances between points, footprints and area-weighted boxes (squared-exponential and
