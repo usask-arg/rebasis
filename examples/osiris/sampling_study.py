@@ -112,6 +112,23 @@ def fit_covariance(y, coords, ndays, n_sub=1500, seed=0, lat_range=(-90.0, 90.0)
     return res.x, -res.fun
 
 
+def fit_with_rebasis(y, coords, ndays, lat_range, n_sub=1500):
+    """rb.fit_covariance with a fitted drift prior: lengths, variance, nugget and the width of
+    the drift, all by maximum likelihood with analytic gradients."""
+    global DRIFT_PRIOR
+    DRIFT_PRIOR = DRIFT_PRIOR or 0.1
+    v = float(np.var(y))
+    return rb.fit_covariance(
+        y,
+        coords,
+        _component(v, 10.0, 60.0, 5.0),
+        noise=0.0,
+        mean=mean_basis(ndays, lat_range),
+        nugget=0.01 * v,
+        subsample=n_sub,
+    )
+
+
 def describe(theta):
     p = np.exp(theta)
     parts = [
@@ -149,6 +166,11 @@ def main():
     ap.add_argument("pressure", type=float, help="hPa")
     ap.add_argument("--out", default=str(Path(__file__).with_name("out")))
     ap.add_argument("--knots", type=float, default=30.0, help="latitude knot spacing of the mean")
+    ap.add_argument(
+        "--fit-prior",
+        action="store_true",
+        help="fit everything, the drift prior included, with rebasis.fit_covariance",
+    )
     ap.add_argument(
         "--drift-prior",
         type=float,
@@ -198,9 +220,21 @@ def main():
         return
 
     t0 = time.perf_counter()
-    theta, _ll = fit_covariance(y, coords, ndays, lat_range=coverage(lat))
-    noise = float(np.exp(theta[-1]))
-    print(f"fitted in {time.perf_counter() - t0:.0f}s: {describe(theta)}")
+    if args.fit_prior:
+        fit = fit_with_rebasis(y, coords, ndays, coverage(lat))
+        cov_model, noise, mean_model = fit.covariance, fit.nugget, fit.mean
+        p = fit.parameters
+        print(
+            f"fitted with rebasis in {time.perf_counter() - t0:.0f}s ({fit.n_iterations} "
+            f"iterations): σ {np.sqrt(p['variance']):.3f} (lat {p['length.lat']:.1f}°, lon "
+            f"{p['length.lon']:.0f}°, t {p['length.time']:.1f} d), drift prior "
+            f"{p['mean.1.prior_std']:.3f}, nugget σ {np.sqrt(fit.nugget):.3f}"
+        )
+    else:
+        theta, _ll = fit_covariance(y, coords, ndays, lat_range=coverage(lat))
+        noise = float(np.exp(theta[-1]))
+        cov_model, mean_model = covariance(theta), mean_basis(ndays, coverage(lat))
+        print(f"fitted in {time.perf_counter() - t0:.0f}s: {describe(theta)}")
 
     t0 = time.perf_counter()
     # covered bands are contiguous: estimate those, report the others as not covered
@@ -215,10 +249,10 @@ def main():
         y,
         coords,
         targets,
-        covariance(theta),
+        cov_model,
         noise=noise,
         target_weight={"lat": "cos_lat_deg"},
-        mean=mean_basis(ndays, coverage(lat)),
+        mean=mean_model,
     )
     print(f"estimated in {time.perf_counter() - t0:.0f}s")
     g, s = np.full(len(truth), np.nan), np.full(len(truth), np.nan)
@@ -240,7 +274,7 @@ def main():
         f"{rms(g - truth):.3f} ppmv; truth within 2σ in "
         f"{np.sum(np.abs(g - truth) < 2 * s)}/{np.sum(covered)} covered bands"
     )
-    model = "two_scale" if TWO_SCALE else "global"
+    model = "fitted_prior" if args.fit_prior else "two_scale" if TWO_SCALE else "global"
     np.savez(
         out / f"sampling_{model}_{args.year}{args.month:02d}_{args.pressure:g}hPa.npz",
         edges=EDGES,
@@ -248,7 +282,6 @@ def main():
         bin=b,
         est=g,
         std=s,
-        theta=theta,
         lat=lat,
         lon=lon,
         day=day,

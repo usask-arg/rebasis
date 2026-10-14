@@ -34,6 +34,7 @@ from ._estimate import (
     log_likelihood,
     optimal_estimate,
 )
+from ._fit import CovarianceFit, fit_covariance
 from ._ops import (
     PARAMETERS,
     Fit,
@@ -69,6 +70,7 @@ __all__ = [
     "PARAMETERS",
     "Covariance",
     "CovarianceDim",
+    "CovarianceFit",
     "CovarianceSum",
     "Estimate",
     "Fit",
@@ -80,6 +82,7 @@ __all__ = [
     "evaluate",
     "faddeeva_re",
     "fit",
+    "fit_covariance",
     "gram",
     "inner_products",
     "log_likelihood",

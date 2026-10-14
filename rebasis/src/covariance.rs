@@ -21,9 +21,9 @@ use rayon::prelude::*;
 
 use crate::element::Element;
 use crate::error::{Result, invalid};
-use crate::integrate::{Weight, inner, integral};
-use crate::profile::{MaternOrder, Profile};
-use crate::quadrature::{gl8, integrate};
+use crate::integrate::{Weight, inner, inner_derivative, integral};
+use crate::profile::{MaternOrder, Parameter, Profile};
+use crate::quadrature::gl8;
 use crate::space::Space;
 
 /// The correlation function c(Δ) of one dimension.
@@ -144,11 +144,47 @@ impl Covariance1d {
         Element::profile(self.profile, x, self.cutoff).expect("valid profile")
     }
 
+    /// (c(Δ), ℓ ∂c/∂ℓ) summed over periodic images. c depends on Δ/ℓ, so ℓ ∂c/∂ℓ = −Δ c'(Δ).
+    pub fn value_and_length_derivative(&self, delta: f64) -> (f64, f64) {
+        self.images(delta, delta, 0.0)
+            .map(|j| {
+                let d = delta - self.shift(j);
+                if d.abs() <= self.radius {
+                    (self.profile.value(d), -d * self.profile.d_dt(d))
+                } else {
+                    (0.0, 0.0)
+                }
+            })
+            .fold((0.0, 0.0), |(a, b), (c, d)| (a + c, b + d))
+    }
+
+    /// Σ_j ⟨e, c(· − x − jP)⟩_w and its ℓ ∂/∂ℓ: a dilation of the centred profile, i.e. its
+    /// `Scale` derivative (including the tiny terms of its moving truncation edges).
+    fn element_point_both(
+        &self,
+        e: &Element,
+        w: Weight,
+        x: f64,
+        derivative: bool,
+        knots: &mut Vec<f64>,
+    ) -> (f64, f64) {
+        let mut v = 0.0;
+        let mut d = 0.0;
+        for j in self.images(e.lower(), e.upper(), x) {
+            let k = self.centred(x + self.shift(j));
+            v += inner(e, &k, w, knots);
+            if derivative {
+                let jumps = k.jumps(Parameter::Scale).expect("profiles have a scale");
+                d += inner_derivative(&k, e, Parameter::Scale, w, &jumps, knots)
+                    .expect("profiles have a scale");
+            }
+        }
+        (v, d)
+    }
+
     /// Σ_j ⟨e, c(· − x − jP)⟩_w.
     fn element_point(&self, e: &Element, w: Weight, x: f64, knots: &mut Vec<f64>) -> f64 {
-        self.images(e.lower(), e.upper(), x)
-            .map(|j| inner(e, &self.centred(x + self.shift(j)), w, knots))
-            .sum()
+        self.element_point_both(e, w, x, false, knots).0
     }
 
     /// ∫∫ a(x) w_a(x) b(y) w_b(y) c(x − y) dx dy, the unnormalized covariance of two atoms (a
@@ -165,7 +201,31 @@ impl Covariance1d {
             (Element::Delta { x: xa }, Element::Delta { x: xb }) => self.value(xa - xb),
             (Element::Delta { x }, e) => self.element_point(e, wb, *x, &mut scratch.inner),
             (e, Element::Delta { x }) => self.element_point(e, wa, *x, &mut scratch.inner),
-            _ => self.element_element(a, wa, b, wb, scratch),
+            _ => self.element_element(a, wa, b, wb, false, scratch).0,
+        }
+    }
+
+    /// [`Covariance1d::between`] and its derivative ℓ ∂/∂ℓ with respect to the correlation
+    /// length (the atoms' normalizations do not depend on ℓ).
+    pub fn between_and_length_derivative(
+        &self,
+        a: &Element,
+        wa: Weight,
+        b: &Element,
+        wb: Weight,
+        scratch: &mut Scratch,
+    ) -> (f64, f64) {
+        match (a, b) {
+            (Element::Delta { x: xa }, Element::Delta { x: xb }) => {
+                self.value_and_length_derivative(xa - xb)
+            }
+            (Element::Delta { x }, e) => {
+                self.element_point_both(e, wb, *x, true, &mut scratch.inner)
+            }
+            (e, Element::Delta { x }) => {
+                self.element_point_both(e, wa, *x, true, &mut scratch.inner)
+            }
+            _ => self.element_element(a, wa, b, wb, true, scratch),
         }
     }
 
@@ -175,8 +235,9 @@ impl Covariance1d {
         wa: Weight,
         b: &Element,
         wb: Weight,
+        derivative: bool,
         scratch: &mut Scratch,
-    ) -> f64 {
+    ) -> (f64, f64) {
         let (lo, hi) = (a.lower(), a.upper());
         let knots = &mut scratch.outer;
         knots.clear();
@@ -205,6 +266,7 @@ impl Covariance1d {
 
         let inner_knots = &mut scratch.inner;
         let mut total = 0.0;
+        let mut total_d = 0.0;
         for w in knots.windows(2) {
             let (mut x0, end) = (w[0], w[1]);
             while x0 < end {
@@ -217,18 +279,23 @@ impl Covariance1d {
                 } else {
                     limit
                 };
-                total += integrate(gl8(), x0, x0 + h, |x| {
+                // one quadrature for the value and the derivative: the rule is linear, so
+                // accumulate both from the same nodes
+                let rule = gl8();
+                let (mid, half) = (x0 + 0.5 * h, 0.5 * h);
+                for (t, wt) in rule.nodes.iter().zip(&rule.weights) {
+                    let x = mid + half * t;
                     let v = a.evaluate(x) * wa.value(x);
-                    if v == 0.0 {
-                        0.0
-                    } else {
-                        v * self.element_point(b, wb, x, inner_knots)
+                    if v != 0.0 {
+                        let (g, gd) = self.element_point_both(b, wb, x, derivative, inner_knots);
+                        total += wt * half * v * g;
+                        total_d += wt * half * v * gd;
                     }
-                });
+                }
                 x0 += h;
             }
         }
-        total
+        (total, total_d)
     }
 }
 
@@ -348,6 +415,70 @@ impl ProductCovariance {
             }
         }
         Ok(out)
+    }
+
+    /// The symmetric covariance matrix K of the atoms of `a`, and ℓ_d ∂K/∂ℓ_d for every
+    /// dimension d (the variance derivative σ² ∂K/∂σ² is K itself): what the gradient of the
+    /// log likelihood with respect to the correlation lengths needs.
+    pub fn matrix_with_length_derivatives(
+        &self,
+        a: Atoms,
+    ) -> Result<(Array2<f64>, Vec<Array2<f64>>)> {
+        let dims = self.dims.len();
+        let n = a.len(dims)?;
+        let na = a.norms();
+        type Row = (Vec<f64>, Vec<Vec<f64>>);
+        let rows: Vec<Row> = (0..n)
+            .into_par_iter()
+            .map_init(Scratch::default, |scratch, i| {
+                let mut vals = Vec::with_capacity(n - i);
+                let mut ders = vec![Vec::with_capacity(n - i); dims];
+                let mut f = vec![0.0; dims];
+                let mut fd = vec![0.0; dims];
+                for j in i..n {
+                    let mut scale = self.variance;
+                    for (d, c) in self.dims.iter().enumerate() {
+                        let (v, dv) = c.between_and_length_derivative(
+                            &a.spaces[d].elements()[i],
+                            a.weights[d],
+                            &a.spaces[d].elements()[j],
+                            a.weights[d],
+                            scratch,
+                        );
+                        let norm = na[d][i] * na[d][j];
+                        f[d] = v / norm;
+                        fd[d] = dv / norm;
+                    }
+                    let k: f64 = f.iter().product::<f64>() * scale;
+                    vals.push(k);
+                    for d in 0..dims {
+                        // σ² f'_d Π_{e≠d} f_e
+                        scale = self.variance * fd[d];
+                        for (e, fe) in f.iter().enumerate() {
+                            if e != d {
+                                scale *= fe;
+                            }
+                        }
+                        ders[d].push(scale);
+                    }
+                }
+                (vals, ders)
+            })
+            .collect();
+        let mut k = Array2::zeros((n, n));
+        let mut g = vec![Array2::zeros((n, n)); dims];
+        for (i, (vals, ders)) in rows.into_iter().enumerate() {
+            for (off, v) in vals.into_iter().enumerate() {
+                let j = i + off;
+                k[[i, j]] = v;
+                k[[j, i]] = v;
+                for d in 0..dims {
+                    g[d][[i, j]] = ders[d][off];
+                    g[d][[j, i]] = ders[d][off];
+                }
+            }
+        }
+        Ok((k, g))
     }
 
     /// The variances of the atoms of `a` (the diagonal of `matrix(a, a)`).
@@ -471,6 +602,53 @@ mod tests {
             )
         };
         assert!((full(3.0) - full(181.0)).abs() < 1e-12 * full(3.0));
+    }
+
+    #[test]
+    fn length_derivatives_match_finite_differences() {
+        let d = |x: f64| Element::delta(x).unwrap();
+        let w = Weight::Cosine { scale: 0.02 };
+        let pairs: Vec<(Element, Weight, Element, Weight)> = vec![
+            (d(0.3), Weight::Uniform, d(1.1), Weight::Uniform),
+            (box_(0.0, 1.3), w, d(0.7), Weight::Uniform),
+            (d(2.0), Weight::Uniform, box_(0.5, 1.6), w),
+            (box_(0.0, 1.3), w, box_(0.4, 2.9), Weight::Uniform),
+            (
+                Element::hat(0.0, 0.5, 1.2).unwrap(),
+                Weight::Uniform,
+                box_(0.9, 1.5),
+                w,
+            ),
+        ];
+        let families = [
+            Family::SquaredExponential,
+            Family::Matern(MaternOrder::Half),
+            Family::Matern(MaternOrder::ThreeHalves),
+            Family::Matern(MaternOrder::FiveHalves),
+        ];
+        for family in families {
+            for period in [None, Some(3.0)] {
+                let l = 0.6;
+                let c = Covariance1d::new(family, l, period).unwrap();
+                let h = 1e-6;
+                let cp = Covariance1d::new(family, l * (1.0 + h), period).unwrap();
+                let cm = Covariance1d::new(family, l * (1.0 - h), period).unwrap();
+                let mut s = Scratch::default();
+                for (a, wa, b, wb) in &pairs {
+                    let (v, dv) = c.between_and_length_derivative(a, *wa, b, *wb, &mut s);
+                    assert!(
+                        (v - c.between(a, *wa, b, *wb, &mut s)).abs() < 1e-15 * v.abs().max(1.0)
+                    );
+                    let fd = (cp.between(a, *wa, b, *wb, &mut s)
+                        - cm.between(a, *wa, b, *wb, &mut s))
+                        / (2.0 * h);
+                    assert!(
+                        (dv - fd).abs() < 1e-7 * fd.abs().max(1e-3),
+                        "{family:?} {period:?} {a:?} {b:?}: {dv} vs {fd}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -45,6 +45,9 @@ Estimation
 .. autoclass:: rebasis.CovarianceSum
 .. autoclass:: rebasis.MeanTerm
 .. autofunction:: rebasis.log_likelihood
+.. autofunction:: rebasis.fit_covariance
+.. autoclass:: rebasis.CovarianceFit
+   :members: estimate
 
 Errors and constants
 --------------------

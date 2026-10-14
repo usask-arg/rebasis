@@ -163,17 +163,28 @@ any field in the span of the mean basis is reproduced exactly.
 
 ## Fitting the covariance
 
-The log likelihood is cheap enough to maximize; on a subsample, for speed:
+{func}`~rebasis.fit_covariance` maximizes the (restricted) log likelihood over the variance and
+correlation lengths, a nugget added to the noise, and the widths of mean terms with priors, with
+analytic gradients (the length derivatives of every covariance, box averages included, are
+exact). A subsample of a few thousand observations usually determines them well:
 
 ```{code-cell} ipython3
-sub = rng.choice(y.size, 2000, replace=False)
-mean = {"lat": rb.Space.bsplines_clamped(np.linspace(-90, 90, 7), 3), "time": rb.Space.hats([0.0, 30.0])}
-for length in [2.0, 6.0, 15.0]:
-    c = cov.replace(time=rb.CovarianceDim("matern32", length))
-    ll = rb.log_likelihood(y[sub], {"lat": lat[sub], "lon": lon[sub], "time": t[sub]}, c,
-                           noise=4.0, mean=mean)
-    print(f"time correlation length {length:5.1f} days: log likelihood {ll:10.1f}")
+drift = rb.Space.shifted([15.0], [-15.0, 15.0], [-0.5, 0.5])  # (t − 15) / 30
+lat_basis = rb.Space.bsplines_clamped(np.linspace(-90, 90, 7), 3)
+fit = rb.fit_covariance(
+    y,
+    {"lat": lat, "lon": lon, "time": t},
+    cov,
+    noise=2.0**2,
+    mean=[rb.MeanTerm({"lat": lat_basis}), rb.MeanTerm({"lat": lat_basis, "time": drift}, prior_std=1.0)],
+    subsample=1500,
+)
+print(fit.success, fit.n_iterations, "iterations")
+{k: round(v, 3) for k, v in fit.parameters.items()}
 ```
+
+`fit.estimate(...)` then runs {func}`~rebasis.optimal_estimate` with the fitted covariance,
+mean and nugget.
 
 ## Cost and neighbourhoods
 

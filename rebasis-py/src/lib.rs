@@ -696,6 +696,35 @@ fn covariance_matrix<'py>(
     array2(py, m)
 }
 
+type MatrixAndDerivatives<'py> = (Bound<'py, PyArray2<f64>>, Vec<Bound<'py, PyArray2<f64>>>);
+
+/// The symmetric covariance K of atoms a and ℓ_d ∂K/∂ℓ_d for each dimension d.
+#[pyfunction]
+fn covariance_length_derivatives<'py>(
+    py: Python<'py>,
+    variance: f64,
+    dims: Vec<DimSpec>,
+    a: Vec<Bound<'py, PySpace>>,
+    wa: Vec<Option<f64>>,
+) -> PyResult<MatrixAndDerivatives<'py>> {
+    let cov = product_covariance(variance, dims)?;
+    let wa = weights(wa)?;
+    let a: Vec<&rebasis::Space> = a.iter().map(|s| &s.get().inner).collect();
+    let (k, g) = py
+        .detach(|| {
+            cov.matrix_with_length_derivatives(rebasis::Atoms {
+                spaces: &a,
+                weights: &wa,
+            })
+        })
+        .map_err(to_pyerr)?;
+    let g = g
+        .into_iter()
+        .map(|m| array2(py, m))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((array2(py, k)?, g))
+}
+
 /// The variances of product atoms a.
 #[pyfunction]
 fn covariance_diagonal<'py>(
@@ -740,5 +769,6 @@ fn _rebasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(faddeeva_re, m)?)?;
     m.add_function(wrap_pyfunction!(covariance_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(covariance_diagonal, m)?)?;
+    m.add_function(wrap_pyfunction!(covariance_length_derivatives, m)?)?;
     Ok(())
 }

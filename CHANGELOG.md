@@ -12,6 +12,9 @@
   and `CovarianceSum` (`Covariance + Covariance`) for multi-scale priors.
 - Estimation: `neighborhood=` estimates blocks of targets from the observations near them (with
   periodic wrap), for data sets far beyond a single dense solve; `Estimate.n_used`.
+- `fit_covariance`: maximum (restricted) likelihood for variances, correlation lengths, a nugget
+  and mean-term prior widths, with analytic gradients from exact length derivatives of the
+  covariances (`ProductCovariance::matrix_with_length_derivatives` in Rust).
 
 ## 0.1.0
 
