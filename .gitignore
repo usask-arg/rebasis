@@ -11,4 +11,4 @@
 .mypy_cache/
 *.egg-info/
 .DS_Store
-examples/demo.png
+examples/*.png

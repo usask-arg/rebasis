@@ -43,7 +43,7 @@ def test_projection_conserves_and_applies_along_any_axis():
     f = np.stack([np.sin(5 * x), x**2, np.ones_like(x)])  # (3, 201)
     g = p.apply(f, axis=-1)
     assert g.shape == (3, 4)
-    np.testing.assert_allclose(g @ coarse.integrals, f @ fine.integrals, rtol=1e-13)
+    np.testing.assert_allclose(g @ coarse.integrals(), f @ fine.integrals(), rtol=1e-13)
     np.testing.assert_allclose(g[2], 1.0, rtol=1e-13)
     np.testing.assert_allclose(p.apply(f.T, axis=0), g.T, rtol=1e-14)
     np.testing.assert_allclose(p @ f.T, g.T, rtol=1e-14)
@@ -70,7 +70,7 @@ def test_shifted_tabulated_shape_with_stretch():
     shape_x = np.array([-1.0, 0.0, 1.0])
     shape_y = np.array([0.0, 1.0, 0.0])
     s = rb.Space.shifted([2.0, 5.0], shape_x, shape_y, stretch=[0.5, 2.0])
-    np.testing.assert_allclose(s.integrals, [0.5, 2.0])
+    np.testing.assert_allclose(s.integrals(), [0.5, 2.0])
     np.testing.assert_allclose(s.lower, [1.5, 3.0])
 
 

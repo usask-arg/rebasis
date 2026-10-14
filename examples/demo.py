@@ -48,11 +48,11 @@ ax2.plot(xx, coarse_hats.evaluate(xx) @ g_hat, label="projection onto 0.25 nm ha
 ax2.set_xlabel("wavelength [nm]")
 ax2.set_ylabel("transmittance")
 ax2.legend(loc="lower left", fontsize=8)
-total = f @ hires.integrals
+total = f @ hires.integrals()
 ax2.set_title(
     "project: conservative regridding  "
-    f"(∫f: model {total:.6f}, boxes {g_box @ boxes.integrals:.6f}, "
-    f"hats {g_hat @ coarse_hats.integrals:.6f})"
+    f"(∫f: model {total:.6f}, boxes {g_box @ boxes.integrals():.6f}, "
+    f"hats {g_hat @ coarse_hats.integrals():.6f})"
 )
 fig.tight_layout()
 out = Path(__file__).with_name("demo.png")

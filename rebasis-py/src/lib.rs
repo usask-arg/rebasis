@@ -1,13 +1,16 @@
 //! Python extension module `rebasis._rebasis`.
 //!
-//! Functions take contiguous float64 numpy arrays (the `rebasis` Python package converts) and
-//! return numpy arrays; sparse matrices are returned as (indptr, indices, data, shape) for the
-//! Python side to wrap in scipy. Computations release the GIL.
+//! Functions take contiguous float64 numpy arrays (the `rebasis` Python package converts and
+//! broadcasts per-element parameters to full length) and return numpy arrays; sparse matrices
+//! are returned as (indptr, indices, data, shape) for the Python side to wrap in scipy. A
+//! `weight` argument is None (uniform) or the scale s of a cos(s·x) weight. Computations
+//! release the GIL.
 
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::prelude::*;
+use rebasis::{Apodization, Interpolation, Profile, Weight};
 
 create_exception!(_rebasis, SingularError, PyValueError);
 
@@ -23,6 +26,71 @@ fn read_vec(x: &Bound<'_, PyArray1<f64>>, name: &str) -> PyResult<Vec<f64>> {
         .try_readonly()
         .map_err(|e| PyBufferError::new_err(format!("{name} cannot be read: {e}")))?;
     Ok(r.as_array().to_vec())
+}
+
+fn read_rows(x: &Bound<'_, PyArray2<f64>>, name: &str) -> PyResult<Vec<Vec<f64>>> {
+    let r = x
+        .try_readonly()
+        .map_err(|e| PyBufferError::new_err(format!("{name} cannot be read: {e}")))?;
+    Ok(r.as_array()
+        .rows()
+        .into_iter()
+        .map(|row| row.to_vec())
+        .collect())
+}
+
+/// Reads a (k, n) float64 array as a core ndarray view and runs `f` on it with the GIL released.
+fn with_matrix<'py, T: Send>(
+    py: Python<'py>,
+    a: &Bound<'py, PyArray2<f64>>,
+    name: &str,
+    expected_cols: usize,
+    f: impl FnOnce(ndarray::ArrayView2<f64>) -> T + Send,
+) -> PyResult<T> {
+    let r = a
+        .try_readonly()
+        .map_err(|e| PyBufferError::new_err(format!("{name} cannot be read: {e}")))?;
+    let shape = (r.shape()[0], r.shape()[1]);
+    if shape.1 != expected_cols {
+        return Err(PyValueError::new_err(format!(
+            "{name} has {} values along the transformed axis, expected {expected_cols}",
+            shape.1
+        )));
+    }
+    let view = ndarray::ArrayView2::from_shape(shape, r.as_slice()?)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(py.detach(|| f(view)))
+}
+
+fn weight(scale: Option<f64>) -> PyResult<Weight> {
+    match scale {
+        None => Ok(Weight::Uniform),
+        Some(s) if s.is_finite() && s != 0.0 => Ok(Weight::Cosine { scale: s }),
+        Some(s) => Err(PyValueError::new_err(format!(
+            "bad cosine weight scale {s}"
+        ))),
+    }
+}
+
+fn interpolation(name: &str) -> PyResult<Interpolation> {
+    match name {
+        "linear" => Ok(Interpolation::Linear),
+        "pchip" => Ok(Interpolation::Pchip),
+        other => Err(PyValueError::new_err(format!(
+            "interpolation must be 'linear' or 'pchip', got {other:?}"
+        ))),
+    }
+}
+
+fn normalization(name: &str) -> PyResult<rebasis::Normalization> {
+    match name {
+        "integral" => Ok(rebasis::Normalization::Integral),
+        "rowsum" => Ok(rebasis::Normalization::RowSum),
+        "none" => Ok(rebasis::Normalization::None),
+        other => Err(PyValueError::new_err(format!(
+            "normalization must be 'integral', 'rowsum' or 'none', got {other:?}"
+        ))),
+    }
 }
 
 type CsrParts<'py> = (
@@ -53,30 +121,61 @@ pub struct PySpace {
     inner: rebasis::Space,
 }
 
+fn space(r: rebasis::Result<rebasis::Space>) -> PyResult<PySpace> {
+    Ok(PySpace {
+        inner: r.map_err(to_pyerr)?,
+    })
+}
+
+/// Profiles at `centers` from per-element parameters (each already of length len(centers)).
+fn profiles(
+    centers: Vec<f64>,
+    cutoff: f64,
+    make: impl Fn(usize) -> rebasis::Result<Profile>,
+) -> PyResult<PySpace> {
+    let p = (0..centers.len())
+        .map(make)
+        .collect::<rebasis::Result<Vec<_>>>()
+        .map_err(to_pyerr)?;
+    if p.is_empty() {
+        return Ok(PySpace {
+            inner: rebasis::Space::new(vec![]),
+        });
+    }
+    space(rebasis::Space::profiles(&centers, &p, cutoff))
+}
+
 #[pymethods]
 impl PySpace {
     #[staticmethod]
     fn deltas(x: Bound<'_, PyArray1<f64>>) -> PyResult<Self> {
-        let x = read_vec(&x, "x")?;
-        Ok(PySpace {
-            inner: rebasis::Space::deltas(&x).map_err(to_pyerr)?,
-        })
+        space(rebasis::Space::deltas(&read_vec(&x, "x")?))
     }
 
     #[staticmethod]
     fn boxes(edges: Bound<'_, PyArray1<f64>>) -> PyResult<Self> {
-        let e = read_vec(&edges, "edges")?;
-        Ok(PySpace {
-            inner: rebasis::Space::boxes(&e).map_err(to_pyerr)?,
-        })
+        space(rebasis::Space::boxes(&read_vec(&edges, "edges")?))
     }
 
     #[staticmethod]
     fn hats(nodes: Bound<'_, PyArray1<f64>>) -> PyResult<Self> {
-        let n = read_vec(&nodes, "nodes")?;
-        Ok(PySpace {
-            inner: rebasis::Space::hats(&n).map_err(to_pyerr)?,
-        })
+        space(rebasis::Space::hats(&read_vec(&nodes, "nodes")?))
+    }
+
+    #[staticmethod]
+    fn bsplines(knots: Bound<'_, PyArray1<f64>>, degree: usize) -> PyResult<Self> {
+        space(rebasis::Space::bsplines(
+            &read_vec(&knots, "knots")?,
+            degree,
+        ))
+    }
+
+    #[staticmethod]
+    fn bsplines_clamped(breakpoints: Bound<'_, PyArray1<f64>>, degree: usize) -> PyResult<Self> {
+        space(rebasis::Space::bsplines_clamped(
+            &read_vec(&breakpoints, "breakpoints")?,
+            degree,
+        ))
     }
 
     #[staticmethod]
@@ -85,30 +184,194 @@ impl PySpace {
         sigma: Bound<'_, PyArray1<f64>>,
         cutoff: f64,
     ) -> PyResult<Self> {
-        let c = read_vec(&centers, "centers")?;
         let s = read_vec(&sigma, "sigma")?;
-        Ok(PySpace {
-            inner: rebasis::Space::gaussians(&c, &s, cutoff).map_err(to_pyerr)?,
+        profiles(read_vec(&centers, "centers")?, cutoff, |i| {
+            Profile::gaussian(s[i])
         })
     }
 
-    /// Copies of the piecewise-linear shape (shape_x, shape_y), shifted to `centers` and
-    /// stretched by `stretch`.
     #[staticmethod]
-    fn shifted_linear(
+    fn lorentzians(
+        centers: Bound<'_, PyArray1<f64>>,
+        hwhm: Bound<'_, PyArray1<f64>>,
+        cutoff: f64,
+    ) -> PyResult<Self> {
+        let h = read_vec(&hwhm, "hwhm")?;
+        profiles(read_vec(&centers, "centers")?, cutoff, |i| {
+            Profile::lorentzian(h[i])
+        })
+    }
+
+    #[staticmethod]
+    fn voigts(
+        centers: Bound<'_, PyArray1<f64>>,
+        sigma: Bound<'_, PyArray1<f64>>,
+        gamma: Bound<'_, PyArray1<f64>>,
+        cutoff: f64,
+    ) -> PyResult<Self> {
+        let (s, g) = (read_vec(&sigma, "sigma")?, read_vec(&gamma, "gamma")?);
+        profiles(read_vec(&centers, "centers")?, cutoff, |i| {
+            Profile::voigt(s[i], g[i])
+        })
+    }
+
+    #[staticmethod]
+    fn pseudo_voigts(
+        centers: Bound<'_, PyArray1<f64>>,
+        hwhm: Bound<'_, PyArray1<f64>>,
+        eta: Bound<'_, PyArray1<f64>>,
+        cutoff: f64,
+    ) -> PyResult<Self> {
+        let (h, e) = (read_vec(&hwhm, "hwhm")?, read_vec(&eta, "eta")?);
+        profiles(read_vec(&centers, "centers")?, cutoff, |i| {
+            Profile::pseudo_voigt(h[i], e[i])
+        })
+    }
+
+    #[staticmethod]
+    fn super_gaussians(
+        centers: Bound<'_, PyArray1<f64>>,
+        hwhm_left: Bound<'_, PyArray1<f64>>,
+        hwhm_right: Bound<'_, PyArray1<f64>>,
+        power: Bound<'_, PyArray1<f64>>,
+        cutoff: f64,
+    ) -> PyResult<Self> {
+        let l = read_vec(&hwhm_left, "hwhm_left")?;
+        let r = read_vec(&hwhm_right, "hwhm_right")?;
+        let p = read_vec(&power, "power")?;
+        profiles(read_vec(&centers, "centers")?, cutoff, |i| {
+            Profile::super_gaussian(l[i], r[i], p[i])
+        })
+    }
+
+    #[staticmethod]
+    fn smoothed_boxes(
+        centers: Bound<'_, PyArray1<f64>>,
+        half_width: Bound<'_, PyArray1<f64>>,
+        sigma: Bound<'_, PyArray1<f64>>,
+        cutoff: f64,
+    ) -> PyResult<Self> {
+        let w = read_vec(&half_width, "half_width")?;
+        let s = read_vec(&sigma, "sigma")?;
+        profiles(read_vec(&centers, "centers")?, cutoff, |i| {
+            Profile::smoothed_box(w[i], s[i])
+        })
+    }
+
+    /// `apodization` is a name, or None with `cosine_sum` (<= 4) or `polynomial` (<= 5)
+    /// coefficients.
+    #[staticmethod]
+    #[pyo3(signature = (centers, max_opd, cutoff, apodization=None, cosine_sum=None, polynomial=None))]
+    fn fts(
+        centers: Bound<'_, PyArray1<f64>>,
+        max_opd: Bound<'_, PyArray1<f64>>,
+        cutoff: f64,
+        apodization: Option<&str>,
+        cosine_sum: Option<Vec<f64>>,
+        polynomial: Option<Vec<f64>>,
+    ) -> PyResult<Self> {
+        let apod = match (apodization, cosine_sum, polynomial) {
+            (Some(name), None, None) => Apodization::by_name(name).map_err(to_pyerr)?,
+            (None, Some(c), None) if !c.is_empty() && c.len() <= 4 => {
+                let mut a = [0.0; 4];
+                a[..c.len()].copy_from_slice(&c);
+                Apodization::CosineSum(a)
+            }
+            (None, None, Some(c)) if !c.is_empty() && c.len() <= 5 => {
+                let mut a = [0.0; 5];
+                a[..c.len()].copy_from_slice(&c);
+                Apodization::Polynomial(a)
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "give one of apodization (a name), cosine_sum (1-4 coefficients) or \
+                     polynomial (1-5 coefficients)",
+                ));
+            }
+        };
+        let l = read_vec(&max_opd, "max_opd")?;
+        profiles(read_vec(&centers, "centers")?, cutoff, |i| {
+            Profile::fts(l[i], apod)
+        })
+    }
+
+    #[staticmethod]
+    fn rectangles(
+        centers: Bound<'_, PyArray1<f64>>,
+        widths: Bound<'_, PyArray1<f64>>,
+    ) -> PyResult<Self> {
+        space(rebasis::Space::rectangles(
+            &read_vec(&centers, "centers")?,
+            &read_vec(&widths, "widths")?,
+        ))
+    }
+
+    #[staticmethod]
+    fn triangles(
+        centers: Bound<'_, PyArray1<f64>>,
+        hwhm: Bound<'_, PyArray1<f64>>,
+    ) -> PyResult<Self> {
+        space(rebasis::Space::triangles(
+            &read_vec(&centers, "centers")?,
+            &read_vec(&hwhm, "hwhm")?,
+        ))
+    }
+
+    #[staticmethod]
+    fn trapezoids(
+        centers: Bound<'_, PyArray1<f64>>,
+        top: Bound<'_, PyArray1<f64>>,
+        bottom: Bound<'_, PyArray1<f64>>,
+    ) -> PyResult<Self> {
+        space(rebasis::Space::trapezoids(
+            &read_vec(&centers, "centers")?,
+            &read_vec(&top, "top")?,
+            &read_vec(&bottom, "bottom")?,
+        ))
+    }
+
+    /// Copies of the tabulated shape (shape_x, shape_y), shifted to `centers` and stretched by
+    /// `stretch`.
+    #[staticmethod]
+    fn shifted(
         shape_x: Bound<'_, PyArray1<f64>>,
         shape_y: Bound<'_, PyArray1<f64>>,
         centers: Bound<'_, PyArray1<f64>>,
         stretch: Bound<'_, PyArray1<f64>>,
+        interp: &str,
     ) -> PyResult<Self> {
         let sx = read_vec(&shape_x, "shape_x")?;
         let sy = read_vec(&shape_y, "shape_y")?;
-        let c = read_vec(&centers, "centers")?;
-        let s = read_vec(&stretch, "stretch")?;
-        let shape = rebasis::Shape::piecewise_linear(&sx, &sy).map_err(to_pyerr)?;
-        Ok(PySpace {
-            inner: rebasis::Space::shifted(shape, &c, &s).map_err(to_pyerr)?,
-        })
+        let shape = match interpolation(interp)? {
+            Interpolation::Linear => rebasis::Shape::piecewise_linear(&sx, &sy),
+            Interpolation::Pchip => rebasis::Shape::pchip(&sx, &sy),
+        }
+        .map_err(to_pyerr)?;
+        space(rebasis::Space::shifted(
+            shape,
+            &read_vec(&centers, "centers")?,
+            &read_vec(&stretch, "stretch")?,
+        ))
+    }
+
+    /// Per-element tables: x has 1 or len(centers) rows, y has len(centers) rows.
+    #[staticmethod]
+    fn tabulated(
+        centers: Bound<'_, PyArray1<f64>>,
+        x: Bound<'_, PyArray2<f64>>,
+        y: Bound<'_, PyArray2<f64>>,
+        interp: &str,
+    ) -> PyResult<Self> {
+        space(rebasis::Space::tabulated(
+            &read_vec(&centers, "centers")?,
+            &read_rows(&x, "x")?,
+            &read_rows(&y, "y")?,
+            interpolation(interp)?,
+        ))
+    }
+
+    fn derivative(&self, order: usize) -> PyResult<Self> {
+        space(self.inner.derivative(order))
     }
 
     fn __len__(&self) -> usize {
@@ -127,41 +390,45 @@ impl PySpace {
         PyArray1::from_vec(py, self.inner.centers())
     }
 
-    fn integrals<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        PyArray1::from_vec(py, self.inner.integrals())
+    #[pyo3(signature = (weight=None))]
+    fn integrals<'py>(
+        &self,
+        py: Python<'py>,
+        weight: Option<f64>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let w = self::weight(weight)?;
+        let v = py.detach(|| self.inner.integrals(w));
+        Ok(PyArray1::from_vec(py, v))
     }
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, weight=None))]
 fn inner_products<'py>(
     py: Python<'py>,
     a: Bound<'py, PySpace>,
     b: Bound<'py, PySpace>,
-) -> CsrParts<'py> {
+    weight: Option<f64>,
+) -> PyResult<CsrParts<'py>> {
+    let w = self::weight(weight)?;
     let (a, b) = (&a.get().inner, &b.get().inner);
-    let m = py.detach(|| rebasis::inner_products(a, b));
-    csr_parts(py, &m)
+    let m = py.detach(|| rebasis::inner_products(a, b, w));
+    Ok(csr_parts(py, &m))
 }
 
 #[pyfunction]
+#[pyo3(signature = (kernels, basis, normalization, weight=None))]
 fn measure<'py>(
     py: Python<'py>,
     kernels: Bound<'py, PySpace>,
     basis: Bound<'py, PySpace>,
     normalization: &str,
+    weight: Option<f64>,
 ) -> PyResult<CsrParts<'py>> {
-    let norm = match normalization {
-        "integral" => rebasis::Normalization::Integral,
-        "rowsum" => rebasis::Normalization::RowSum,
-        "none" => rebasis::Normalization::None,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "normalization must be 'integral', 'rowsum' or 'none', got {other:?}"
-            )));
-        }
-    };
+    let norm = self::normalization(normalization)?;
+    let w = self::weight(weight)?;
     let (k, b) = (&kernels.get().inner, &basis.get().inner);
-    let m = py.detach(|| rebasis::measure(k, b, norm));
+    let m = py.detach(|| rebasis::measure(k, b, norm, w));
     Ok(csr_parts(py, &m))
 }
 
@@ -185,10 +452,17 @@ pub struct PyProjection {
 #[pymethods]
 impl PyProjection {
     #[new]
-    fn new(py: Python<'_>, src: Bound<'_, PySpace>, dst: Bound<'_, PySpace>) -> PyResult<Self> {
+    #[pyo3(signature = (src, dst, weight=None))]
+    fn new(
+        py: Python<'_>,
+        src: Bound<'_, PySpace>,
+        dst: Bound<'_, PySpace>,
+        weight: Option<f64>,
+    ) -> PyResult<Self> {
+        let w = self::weight(weight)?;
         let (s, d) = (&src.get().inner, &dst.get().inner);
         let inner = py
-            .detach(|| rebasis::Projection::new(s, d))
+            .detach(|| rebasis::Projection::new(s, d, w))
             .map_err(to_pyerr)?;
         Ok(PyProjection { inner })
     }
@@ -204,25 +478,20 @@ impl PyProjection {
     }
 
     /// Projects each row of f, shape (k, n_src), returning (k, n_dst).
+    #[pyo3(signature = (f, bounded=false))]
     fn apply_last_axis<'py>(
         &self,
         py: Python<'py>,
         f: Bound<'py, PyArray2<f64>>,
+        bounded: bool,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let r = f
-            .try_readonly()
-            .map_err(|e| PyBufferError::new_err(format!("f cannot be read: {e}")))?;
-        let shape = (r.shape()[0], r.shape()[1]);
-        if shape.1 != self.inner.n_src() {
-            return Err(PyValueError::new_err(format!(
-                "f has {} values along the projected axis, expected {}",
-                shape.1,
-                self.inner.n_src()
-            )));
-        }
-        let view = ndarray::ArrayView2::from_shape(shape, r.as_slice()?)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let g = py.detach(|| self.inner.apply_last_axis(view));
+        let g = with_matrix(py, &f, "f", self.inner.n_src(), |v| {
+            if bounded {
+                self.inner.apply_bounded_last_axis(v)
+            } else {
+                self.inner.apply_last_axis(v)
+            }
+        })?;
         array2(py, g)
     }
 
@@ -236,14 +505,93 @@ impl PyProjection {
     }
 }
 
+#[pyclass(frozen, name = "Fit", module = "rebasis._rebasis")]
+pub struct PyFit {
+    inner: rebasis::Fit,
+}
+
+#[pymethods]
+impl PyFit {
+    #[new]
+    #[pyo3(signature = (kernels, model, normalization, smoothing, penalty, order, weight=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        kernels: Bound<'_, PySpace>,
+        model: Bound<'_, PySpace>,
+        normalization: &str,
+        smoothing: f64,
+        penalty: &str,
+        order: usize,
+        weight: Option<f64>,
+    ) -> PyResult<Self> {
+        let norm = self::normalization(normalization)?;
+        let w = self::weight(weight)?;
+        let penalty = match penalty {
+            "derivative" => rebasis::Penalty::Derivative(order),
+            "difference" => rebasis::Penalty::Difference(order),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "penalty must be 'derivative' or 'difference', got {other:?}"
+                )));
+            }
+        };
+        let (k, m) = (&kernels.get().inner, &model.get().inner);
+        let inner = py
+            .detach(|| rebasis::Fit::new(k, m, norm, w, smoothing, penalty))
+            .map_err(to_pyerr)?;
+        Ok(PyFit { inner })
+    }
+
+    #[getter]
+    fn n_data(&self) -> usize {
+        self.inner.n_data()
+    }
+
+    #[getter]
+    fn n_model(&self) -> usize {
+        self.inner.n_model()
+    }
+
+    /// Fits each row of data, shape (k, n_data), returning coefficients (k, n_model).
+    fn apply_last_axis<'py>(
+        &self,
+        py: Python<'py>,
+        data: Bound<'py, PyArray2<f64>>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let c = with_matrix(py, &data, "data", self.inner.n_data(), |v| {
+            self.inner.apply_last_axis(v)
+        })?;
+        array2(py, c)
+    }
+
+    fn to_dense<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let d = py.detach(|| self.inner.to_dense());
+        array2(py, d)
+    }
+
+    fn design<'py>(&self, py: Python<'py>) -> CsrParts<'py> {
+        csr_parts(py, self.inner.design())
+    }
+}
+
+/// Re w(x + iy) for y >= 0, w the Faddeeva function.
+#[pyfunction]
+fn faddeeva_re(x: f64, y: f64) -> f64 {
+    rebasis::special::faddeeva_re(x, y)
+}
+
 #[pymodule]
 fn _rebasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("SingularError", m.py().get_type::<SingularError>())?;
+    m.add("FWHM_PER_SIGMA", rebasis::FWHM_PER_SIGMA)?;
     m.add_class::<PySpace>()?;
     m.add_class::<PyProjection>()?;
+    m.add_class::<PyFit>()?;
     m.add_function(wrap_pyfunction!(inner_products, m)?)?;
     m.add_function(wrap_pyfunction!(measure, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate, m)?)?;
+    m.add_function(wrap_pyfunction!(faddeeva_re, m)?)?;
     Ok(())
 }

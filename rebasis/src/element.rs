@@ -1,7 +1,7 @@
 //! Single basis functions (or measurement kernels) on the real line.
 //!
 //! Every element is a *shape*: rebasis does not attach a normalization to it. Boxes, hats and
-//! Gaussians peak at 1, so a grid of hats or boxes is a partition of unity and its coefficients
+//! profiles peak at 1, so a grid of hats or boxes is a partition of unity and its coefficients
 //! are function values. Whether an element acts as a basis function (representing f) or as a
 //! measurement kernel (an instrument response, unit area) is decided by the operation it is
 //! used in, see [`crate::ops`].
@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::error::{Result, invalid};
-use crate::quadrature::{gl8, integrate};
+use crate::profile::Profile;
 
 /// One cubic piece p(x) = Σ c_m (x − a)^m on [a, b).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,6 +41,19 @@ pub struct Shape {
     segments: Vec<Segment>,
 }
 
+fn check_table(x: &[f64], y: &[f64]) -> Result<()> {
+    if x.len() != y.len() || x.len() < 2 {
+        return invalid("a tabulated shape needs x and y of equal length >= 2");
+    }
+    if x.iter().chain(y).any(|v| !v.is_finite()) {
+        return invalid("a tabulated shape must be finite");
+    }
+    if x.windows(2).any(|w| w[1] <= w[0]) {
+        return invalid("a tabulated shape needs strictly increasing x");
+    }
+    Ok(())
+}
+
 impl Shape {
     /// Segments must be finite, non-empty, sorted and non-overlapping (gaps are zero).
     pub fn new(segments: Vec<Segment>) -> Result<Self> {
@@ -63,12 +76,7 @@ impl Shape {
 
     /// The piecewise-linear interpolant of (x, y), zero outside [x[0], x[-1]].
     pub fn piecewise_linear(x: &[f64], y: &[f64]) -> Result<Self> {
-        if x.len() != y.len() || x.len() < 2 {
-            return invalid("piecewise_linear needs x and y of equal length >= 2");
-        }
-        if x.windows(2).any(|w| w[1] <= w[0]) {
-            return invalid("piecewise_linear needs strictly increasing x");
-        }
+        check_table(x, y)?;
         let segments = x
             .windows(2)
             .zip(y.windows(2))
@@ -81,8 +89,114 @@ impl Shape {
         Shape::new(segments)
     }
 
+    /// The monotone piecewise-cubic Hermite (PCHIP, Fritsch–Carlson) interpolant of (x, y),
+    /// zero outside [x[0], x[-1]]. Smooth (C¹) and free of overshoot, with the same slopes as
+    /// `scipy.interpolate.PchipInterpolator`.
+    pub fn pchip(x: &[f64], y: &[f64]) -> Result<Self> {
+        check_table(x, y)?;
+        let n = x.len();
+        let h: Vec<f64> = x.windows(2).map(|w| w[1] - w[0]).collect();
+        let delta: Vec<f64> = (0..n - 1).map(|k| (y[k + 1] - y[k]) / h[k]).collect();
+        let mut d = vec![0.0; n];
+        if n == 2 {
+            d[0] = delta[0];
+            d[1] = delta[0];
+        } else {
+            for k in 1..n - 1 {
+                if delta[k - 1] * delta[k] > 0.0 {
+                    let w1 = 2.0 * h[k] + h[k - 1];
+                    let w2 = h[k] + 2.0 * h[k - 1];
+                    d[k] = (w1 + w2) / (w1 / delta[k - 1] + w2 / delta[k]);
+                }
+            }
+            let edge = |h0: f64, h1: f64, m0: f64, m1: f64| {
+                let d = ((2.0 * h0 + h1) * m0 - h0 * m1) / (h0 + h1);
+                if d.signum() != m0.signum() {
+                    0.0
+                } else if m0.signum() != m1.signum() && d.abs() > 3.0 * m0.abs() {
+                    3.0 * m0
+                } else {
+                    d
+                }
+            };
+            d[0] = edge(h[0], h[1], delta[0], delta[1]);
+            d[n - 1] = edge(h[n - 2], h[n - 3], delta[n - 2], delta[n - 3]);
+        }
+        let segments = (0..n - 1)
+            .map(|k| Segment {
+                a: x[k],
+                b: x[k + 1],
+                coeffs: [
+                    y[k],
+                    d[k],
+                    (3.0 * delta[k] - 2.0 * d[k] - d[k + 1]) / h[k],
+                    (d[k] + d[k + 1] - 2.0 * delta[k]) / (h[k] * h[k]),
+                ],
+            })
+            .collect();
+        Shape::new(segments)
+    }
+
+    /// 1 on [−top, top], falling linearly to 0 at ±bottom. top = 0 is a triangle, top = bottom
+    /// a box.
+    pub fn trapezoid(top: f64, bottom: f64) -> Result<Self> {
+        if !(top.is_finite() && bottom.is_finite() && 0.0 <= top && top <= bottom && bottom > 0.0) {
+            return invalid(format!(
+                "trapezoid needs 0 <= top <= bottom, bottom > 0; got {top}, {bottom}"
+            ));
+        }
+        if top == bottom {
+            return Shape::new(vec![Segment {
+                a: -bottom,
+                b: bottom,
+                coeffs: [1.0, 0.0, 0.0, 0.0],
+            }]);
+        }
+        let mut x = vec![-bottom, -top];
+        let mut y = vec![0.0, 1.0];
+        if top > 0.0 {
+            x.push(top);
+            y.push(1.0);
+        }
+        x.push(bottom);
+        y.push(0.0);
+        Shape::piecewise_linear(&x, &y)
+    }
+
     pub fn segments(&self) -> &[Segment] {
         &self.segments
+    }
+
+    /// The derivative within each segment; jumps at segment ends are not included.
+    pub fn derivative(&self) -> Shape {
+        Shape {
+            segments: self
+                .segments
+                .iter()
+                .map(|s| {
+                    let c = s.coeffs;
+                    Segment {
+                        a: s.a,
+                        b: s.b,
+                        coeffs: [c[1], 2.0 * c[2], 3.0 * c[3], 0.0],
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn scaled(&self, factor: f64) -> Shape {
+        Shape {
+            segments: self
+                .segments
+                .iter()
+                .map(|s| Segment {
+                    a: s.a,
+                    b: s.b,
+                    coeffs: s.coeffs.map(|c| c * factor),
+                })
+                .collect(),
+        }
     }
 
     pub fn lower(&self) -> f64 {
@@ -115,18 +229,18 @@ pub enum Element {
     Box { a: f64, b: f64 },
     /// Linear from 0 at a to 1 at c and back to 0 at b. a == c or c == b gives a half hat.
     Hat { a: f64, c: f64, b: f64 },
-    /// exp(−(x − center)² / 2σ²) on [lo, hi], 0 elsewhere.
-    Gaussian {
-        center: f64,
-        sigma: f64,
-        lo: f64,
-        hi: f64,
-    },
     /// shape((x − center) / stretch).
     Piecewise {
         shape: Arc<Shape>,
         center: f64,
         stretch: f64,
+    },
+    /// profile(x − center) on [lo, hi], 0 elsewhere.
+    Profile {
+        profile: Profile,
+        center: f64,
+        lo: f64,
+        hi: f64,
     },
 }
 
@@ -154,22 +268,23 @@ impl Element {
         Ok(Element::Hat { a, c, b })
     }
 
+    /// `profile` centered at `center`, truncated at `cutoff` (see [`Profile::support`]).
+    pub fn profile(profile: Profile, center: f64, cutoff: f64) -> Result<Self> {
+        if !center.is_finite() {
+            return invalid("profile center must be finite");
+        }
+        let (left, right) = profile.support(cutoff)?;
+        Ok(Element::Profile {
+            profile,
+            center,
+            lo: center - left,
+            hi: center + right,
+        })
+    }
+
     /// A Gaussian truncated at `cutoff` standard deviations either side of the center.
     pub fn gaussian(center: f64, sigma: f64, cutoff: f64) -> Result<Self> {
-        if !(center.is_finite() && sigma.is_finite() && sigma > 0.0) {
-            return invalid(format!(
-                "gaussian needs finite center and sigma > 0, got {sigma}"
-            ));
-        }
-        if !(cutoff.is_finite() && cutoff > 0.0) {
-            return invalid("gaussian cutoff must be finite and > 0");
-        }
-        Ok(Element::Gaussian {
-            center,
-            sigma,
-            lo: center - cutoff * sigma,
-            hi: center + cutoff * sigma,
-        })
+        Element::profile(Profile::gaussian(sigma)?, center, cutoff)
     }
 
     pub fn piecewise(shape: Arc<Shape>, center: f64, stretch: f64) -> Result<Self> {
@@ -187,7 +302,7 @@ impl Element {
         match self {
             Element::Delta { x } => *x,
             Element::Box { a, .. } | Element::Hat { a, .. } => *a,
-            Element::Gaussian { lo, .. } => *lo,
+            Element::Profile { lo, .. } => *lo,
             Element::Piecewise {
                 shape,
                 center,
@@ -200,7 +315,7 @@ impl Element {
         match self {
             Element::Delta { x } => *x,
             Element::Box { b, .. } | Element::Hat { b, .. } => *b,
-            Element::Gaussian { hi, .. } => *hi,
+            Element::Profile { hi, .. } => *hi,
             Element::Piecewise {
                 shape,
                 center,
@@ -214,7 +329,7 @@ impl Element {
             Element::Delta { x } => *x,
             Element::Box { a, b } => 0.5 * (a + b),
             Element::Hat { c, .. } => *c,
-            Element::Gaussian { center, .. } | Element::Piecewise { center, .. } => *center,
+            Element::Profile { center, .. } | Element::Piecewise { center, .. } => *center,
         }
     }
 
@@ -240,17 +355,16 @@ impl Element {
                     (b - x) / (b - c)
                 }
             }
-            Element::Gaussian {
+            Element::Profile {
+                profile,
                 center,
-                sigma,
                 lo,
                 hi,
             } => {
                 if x < *lo || x > *hi {
                     0.0
                 } else {
-                    let t = (x - center) / sigma;
-                    (-0.5 * t * t).exp()
+                    profile.value(x - center)
                 }
             }
             Element::Piecewise {
@@ -261,32 +375,73 @@ impl Element {
         }
     }
 
-    /// ∫ φ(x) dx; 1 for a delta.
-    pub fn integral(&self) -> f64 {
-        match self {
-            Element::Delta { .. } => 1.0,
-            Element::Box { a, b } => b - a,
-            Element::Hat { a, b, .. } => 0.5 * (b - a),
-            Element::Gaussian { sigma, lo, hi, .. } => {
-                let rule = gl8();
-                let n = ((hi - lo) / sigma).ceil().max(1.0) as usize;
-                let h = (hi - lo) / n as f64;
-                (0..n)
-                    .map(|k| {
-                        let x0 = lo + k as f64 * h;
-                        integrate(rule, x0, x0 + h, |x| self.evaluate(x))
-                    })
-                    .sum()
+    /// The `order`-th derivative of a piecewise-polynomial element, excluding the point masses
+    /// at its jumps (so the derivative of a box is zero). Errors for deltas and profiles.
+    pub fn derivative(&self, order: usize) -> Result<Element> {
+        if order == 0 {
+            return Ok(self.clone());
+        }
+        let (shape, center, stretch) = match self {
+            Element::Box { a, b } => (
+                Shape::new(vec![Segment {
+                    a: *a,
+                    b: *b,
+                    coeffs: [1.0, 0.0, 0.0, 0.0],
+                }])?,
+                0.0,
+                1.0,
+            ),
+            Element::Hat { a, c, b } => {
+                let mut segments = Vec::new();
+                if c > a {
+                    segments.push(Segment {
+                        a: *a,
+                        b: *c,
+                        coeffs: [0.0, 1.0 / (c - a), 0.0, 0.0],
+                    });
+                }
+                if b > c {
+                    segments.push(Segment {
+                        a: *c,
+                        b: *b,
+                        coeffs: [1.0, -1.0 / (b - c), 0.0, 0.0],
+                    });
+                }
+                (Shape::new(segments)?, 0.0, 1.0)
             }
-            Element::Piecewise { shape, stretch, .. } => stretch * shape.integral(),
+            Element::Piecewise {
+                shape,
+                center,
+                stretch,
+            } => ((**shape).clone(), *center, *stretch),
+            _ => return invalid("only piecewise-polynomial elements have derivatives"),
+        };
+        let mut d = shape;
+        for _ in 0..order {
+            d = d.derivative();
+        }
+        let d = d.scaled(stretch.powi(-(order as i32)));
+        Element::piecewise(Arc::new(d), center, stretch)
+    }
+
+    /// The profile and its center, for the integrator's step control.
+    pub(crate) fn as_profile(&self) -> Option<(&Profile, f64)> {
+        match self {
+            Element::Profile {
+                profile, center, ..
+            } => Some((profile, *center)),
+            _ => None,
         }
     }
 
-    /// The standard deviation, for Gaussians (the integrator refines on this scale).
-    pub(crate) fn sigma(&self) -> Option<f64> {
+    /// ∫ φ(x) dx over the element's support, exactly for piecewise polynomials.
+    pub(crate) fn polynomial_integral(&self) -> Option<f64> {
         match self {
-            Element::Gaussian { sigma, .. } => Some(*sigma),
-            _ => None,
+            Element::Delta { .. } => Some(1.0),
+            Element::Box { a, b } => Some(b - a),
+            Element::Hat { a, b, .. } => Some(0.5 * (b - a)),
+            Element::Piecewise { shape, stretch, .. } => Some(stretch * shape.integral()),
+            Element::Profile { .. } => None,
         }
     }
 
@@ -308,8 +463,14 @@ impl Element {
                 push(*c);
                 push(*b);
             }
-            Element::Gaussian { lo: l, hi: h, .. } => {
+            Element::Profile {
+                center,
+                lo: l,
+                hi: h,
+                ..
+            } => {
                 push(*l);
+                push(*center);
                 push(*h);
             }
             Element::Piecewise {
@@ -323,5 +484,32 @@ impl Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pchip_interpolates_and_does_not_overshoot() {
+        let x = [0.0, 1.0, 2.0, 3.0, 4.0];
+        let y = [0.0, 0.0, 1.0, 1.0, 0.5];
+        let s = Shape::pchip(&x, &y).unwrap();
+        for (xi, yi) in x.iter().zip(y).take(4) {
+            assert!((s.evaluate(*xi) - yi).abs() < 1e-15);
+        }
+        for k in 0..400 {
+            let v = s.evaluate(k as f64 * 0.01);
+            assert!((-1e-15..=1.0 + 1e-15).contains(&v));
+        }
+    }
+
+    #[test]
+    fn trapezoid_integral() {
+        let t = Shape::trapezoid(0.5, 1.5).unwrap();
+        assert!((t.integral() - 2.0).abs() < 1e-15); // (1 + 3) / 2
+        assert!((Shape::trapezoid(0.0, 1.0).unwrap().integral() - 1.0).abs() < 1e-15);
+        assert!((Shape::trapezoid(1.0, 1.0).unwrap().integral() - 2.0).abs() < 1e-15);
     }
 }

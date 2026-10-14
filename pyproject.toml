@@ -19,10 +19,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+xarray = ["xarray>=2024.7"]
 test = ["pytest>=8"]
 
 [dependency-groups]
-dev = ["maturin>=1.9.4,<2.0", "pytest>=8", "ruff>=0.8", "matplotlib>=3.8"]
+dev = ["maturin>=1.9.4,<2.0", "pytest>=8", "ruff>=0.8", "matplotlib>=3.8", "xarray>=2024.7"]
 
 [tool.uv]
 # Rebuild the editable extension whenever the Rust sources change.
@@ -51,4 +52,4 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "NPY", "RUF"]
-allowed-confusables = ["−", "–", "σ", "Σ", "∫", "⟨", "⟩"]
+allowed-confusables = ["−", "–", "σ", "Σ", "∫", "⟨", "⟩", "×", "γ", "ν"]
