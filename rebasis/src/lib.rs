@@ -13,6 +13,7 @@
 #![allow(clippy::needless_range_loop)]
 
 mod banded;
+pub mod coordinate;
 pub mod element;
 pub mod error;
 mod integrate;
@@ -24,6 +25,7 @@ pub mod sparse;
 pub mod special;
 
 pub use banded::BandedCholesky;
+pub use coordinate::CoordinateMap;
 pub use element::{Element, Segment, Shape};
 pub use error::{Error, Result};
 pub use integrate::{Weight, inner, inner_derivative, integral, integral_derivative};

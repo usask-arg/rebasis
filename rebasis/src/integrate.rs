@@ -55,24 +55,14 @@ impl Weight {
 /// Pieces no longer than this fraction of the step limit use the 4-point rule.
 const SHORT_PIECE: f64 = 0.05;
 
-/// The largest sub-interval starting at x and moving right that keeps every profile within its
-/// step limit (the limit is nondecreasing in the distance from the center, so it is evaluated
-/// at the end of the sub-interval nearest the center).
+/// The largest sub-interval starting at x that keeps every element and the weight within their
+/// step limits.
 #[inline]
 fn step_at(elements: &[&Element], weight: Weight, x: f64) -> f64 {
-    let mut h = weight.step().unwrap_or(f64::INFINITY);
-    for e in elements {
-        if let Some((p, c)) = e.as_profile() {
-            let s = if x >= c {
-                p.step(x - c)
-            } else {
-                let d = c - x;
-                p.step((d - p.step(d)).max(0.0))
-            };
-            h = h.min(s);
-        }
-    }
-    h
+    elements
+        .iter()
+        .map(|e| e.step_limit(x))
+        .fold(weight.step().unwrap_or(f64::INFINITY), f64::min)
 }
 
 /// ∫ Π elements(x) · w(x) dx over [lo, hi] given the sorted knots inside it (inclusive of lo, hi).
@@ -91,7 +81,7 @@ fn integrate_with(
     g: impl Fn(f64) -> f64,
 ) -> f64 {
     let f = |x: f64| g(x) * weight.value(x);
-    let smooth = weight == Weight::Uniform && elements.iter().all(|e| e.as_profile().is_none());
+    let smooth = weight == Weight::Uniform && elements.iter().all(|e| e.is_polynomial());
     if smooth {
         return knots
             .windows(2)

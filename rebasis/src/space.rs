@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::coordinate::CoordinateMap;
 use crate::element::{Element, Segment, Shape};
 use crate::error::{Result, invalid};
 use crate::integrate::{Weight, integral};
@@ -350,6 +351,18 @@ impl Space {
                     };
                     Element::piecewise(Arc::new(shape), c, 1.0)
                 })
+                .collect::<Result<_>>()?,
+        ))
+    }
+
+    /// The elements as functions of x = map.forward(u), u their own coordinate; see
+    /// [`Element::mapped`] for `jacobian`. E.g. a line shape given in wavelength, used against a
+    /// basis in wavenumber: `kernels.mapped(CoordinateMap::NM_CMINV, true)`.
+    pub fn mapped(&self, map: CoordinateMap, jacobian: bool) -> Result<Space> {
+        Ok(Space::new(
+            self.elements
+                .iter()
+                .map(|e| Element::mapped(e.clone(), map, jacobian))
                 .collect::<Result<_>>()?,
         ))
     }

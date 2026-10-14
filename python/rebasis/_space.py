@@ -277,6 +277,42 @@ class Space:
         y = np.ascontiguousarray(np.atleast_2d(np.asarray(y, dtype=np.float64)))
         return cls(_rebasis.Space.tabulated(c, x, y, interp), "tabulated")
 
+    # ---------------------------------------------------- coordinate changes
+
+    def to_wavenumber(self, *, jacobian: bool) -> Space:
+        """This space, defined in wavelength (nm), as functions of wavenumber (cm⁻¹).
+
+        ``jacobian`` decides how values carry over; there is no default because it is a
+        physical choice:
+
+        - ``True`` multiplies by |dλ/dν|, so that integrals over ν equal integrals over λ. Use
+          it for **kernels** (an instrument response given in wavelength averages over
+          wavelength, wherever the spectrum is computed) and for bases of **spectral
+          densities** (radiance per nm).
+        - ``False`` keeps values, f(ν) = f(λ(ν)): bases of **functions** (transmittance,
+          reflectance, sun-normalized radiance).
+
+        Shapes are exact: a Gaussian in wavelength is integrated as such in wavenumber.
+        Parameters (centers, widths) stay in nm, also for :func:`measure_derivative`.
+        """
+        return self.reciprocal(1e7, jacobian=jacobian)
+
+    def to_wavelength(self, *, jacobian: bool) -> Space:
+        """This space, defined in wavenumber (cm⁻¹), as functions of wavelength (nm); see
+        :meth:`to_wavenumber` for ``jacobian``."""
+        return self.reciprocal(1e7, jacobian=jacobian)
+
+    def reciprocal(self, k: float, *, jacobian: bool) -> Space:
+        """The elements as functions of x = k / u, u their own coordinate (supports must not
+        contain 0); see :meth:`to_wavenumber` for ``jacobian``."""
+        return Space(self._inner.mapped("reciprocal", float(k), 0.0, jacobian), f"1/({self._kind})")
+
+    def affine(self, offset: float = 0.0, scale: float = 1.0, *, jacobian: bool) -> Space:
+        """The elements as functions of x = offset + scale·u, u their own coordinate (unit
+        changes, Doppler shifts); see :meth:`to_wavenumber` for ``jacobian``."""
+        inner = self._inner.mapped("affine", float(offset), float(scale), jacobian)
+        return Space(inner, f"affine({self._kind})")
+
     # ------------------------------------------------------------- utilities
 
     def derivative(self, order: int = 1) -> Space:

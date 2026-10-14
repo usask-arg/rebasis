@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::coordinate::CoordinateMap;
 use crate::error::{Result, invalid};
 use crate::profile::{Parameter, Profile};
 
@@ -286,6 +287,25 @@ pub enum Element {
         hi: f64,
         cutoff: f64,
     },
+    /// inner(u(x)) · |du/dx| (if `jacobian`), for x = map.forward(u): an element defined in
+    /// another coordinate. Support [lo, hi].
+    Mapped {
+        inner: Arc<Element>,
+        map: CoordinateMap,
+        jacobian: bool,
+        lo: f64,
+        hi: f64,
+    },
+}
+
+/// |du/dx| if `jacobian`, else 1.
+#[inline]
+fn jacobian_factor(map: &CoordinateMap, jacobian: bool, x: f64) -> f64 {
+    if jacobian {
+        map.d_inverse(x).abs()
+    } else {
+        1.0
+    }
 }
 
 impl Element {
@@ -332,6 +352,28 @@ impl Element {
         Element::profile(Profile::gaussian(sigma)?, center, cutoff)
     }
 
+    /// `inner`, defined in a coordinate u, as a function of x = map.forward(u).
+    ///
+    /// With `jacobian`, the element is multiplied by |du/dx| so that integrals over x equal
+    /// integrals over u: right for kernels (an instrument response defined in wavelength
+    /// averages over wavelength) and for bases of spectral densities (radiance per nm). Without
+    /// it, values are carried over unchanged: right for bases of plain functions (transmittance,
+    /// normalized radiance). A delta maps to the delta at the image point either way.
+    pub fn mapped(inner: Element, map: CoordinateMap, jacobian: bool) -> Result<Self> {
+        map.validate()?;
+        if let Element::Delta { x } = inner {
+            return Element::delta(map.forward(x));
+        }
+        let (lo, hi) = map.image(inner.lower(), inner.upper())?;
+        Ok(Element::Mapped {
+            inner: Arc::new(inner),
+            map,
+            jacobian,
+            lo,
+            hi,
+        })
+    }
+
     pub fn piecewise(shape: Arc<Shape>, center: f64, stretch: f64) -> Result<Self> {
         if !(center.is_finite() && stretch.is_finite() && stretch > 0.0) {
             return invalid("piecewise element needs finite center and stretch > 0");
@@ -347,7 +389,7 @@ impl Element {
         match self {
             Element::Delta { x } => *x,
             Element::Box { a, .. } | Element::Hat { a, .. } => *a,
-            Element::Profile { lo, .. } => *lo,
+            Element::Profile { lo, .. } | Element::Mapped { lo, .. } => *lo,
             Element::Piecewise {
                 shape,
                 center,
@@ -360,7 +402,7 @@ impl Element {
         match self {
             Element::Delta { x } => *x,
             Element::Box { b, .. } | Element::Hat { b, .. } => *b,
-            Element::Profile { hi, .. } => *hi,
+            Element::Profile { hi, .. } | Element::Mapped { hi, .. } => *hi,
             Element::Piecewise {
                 shape,
                 center,
@@ -375,6 +417,7 @@ impl Element {
             Element::Box { a, b } => 0.5 * (a + b),
             Element::Hat { c, .. } => *c,
             Element::Profile { center, .. } | Element::Piecewise { center, .. } => *center,
+            Element::Mapped { inner, map, .. } => map.forward(inner.center()),
         }
     }
 
@@ -418,6 +461,19 @@ impl Element {
                 center,
                 stretch,
             } => shape.evaluate((x - center) / stretch),
+            Element::Mapped {
+                inner,
+                map,
+                jacobian,
+                lo,
+                hi,
+            } => {
+                if x < *lo || x > *hi {
+                    0.0
+                } else {
+                    inner.evaluate(map.inverse(x)) * jacobian_factor(map, *jacobian, x)
+                }
+            }
         }
     }
 
@@ -503,11 +559,44 @@ impl Element {
                 center,
                 stretch,
             } => shape.slope((x - center) / stretch) / stretch,
+            Element::Mapped {
+                inner,
+                map,
+                jacobian,
+                lo,
+                hi,
+            } => {
+                if x < *lo || x > *hi {
+                    return 0.0;
+                }
+                let (u, du) = (map.inverse(x), map.d_inverse(x));
+                let d = inner.slope(u) * du;
+                if *jacobian {
+                    // d/dx [φ(u) |u'|] = φ'(u) u' |u'| + φ(u) sign(u') u''
+                    d * du.abs() + inner.evaluate(u) * du.signum() * map.d2_inverse(x)
+                } else {
+                    d
+                }
+            }
         }
     }
 
     /// ∂φ/∂p at fixed x, excluding the point terms of [`Element::jumps`].
     pub fn d_smooth(&self, x: f64, p: Parameter) -> Result<f64> {
+        if let Element::Mapped {
+            inner,
+            map,
+            jacobian,
+            lo,
+            hi,
+        } = self
+        {
+            // parameters live in the inner coordinate
+            if x < *lo || x > *hi {
+                return Ok(0.0);
+            }
+            return Ok(inner.d_smooth(map.inverse(x), p)? * jacobian_factor(map, *jacobian, x));
+        }
         let c = self.center();
         Ok(match p {
             // φ(x − c): ∂/∂c = −φ'
@@ -536,6 +625,27 @@ impl Element {
         // jumps J_k of φ at x_k; a translation or dilation moves them, giving −J_k ∂x_k/∂p
         let raw: Vec<(f64, f64)> = match self {
             Element::Delta { .. } => return Ok(vec![]),
+            Element::Mapped {
+                inner,
+                map,
+                jacobian,
+                ..
+            } => {
+                // ∫ φ(u(x)) J ψ dx = ∫ φ(u) ψ(x(u)) |dx/du|^(1 − jacobian) du
+                return Ok(inner
+                    .jumps(p)?
+                    .into_iter()
+                    .map(|(u, a)| {
+                        let x = map.forward(u);
+                        let f = if *jacobian {
+                            1.0
+                        } else {
+                            1.0 / map.d_inverse(x).abs()
+                        };
+                        (x, a * f)
+                    })
+                    .collect());
+            }
             Element::Box { a, b } => vec![(*a, 1.0), (*b, -1.0)],
             Element::Hat { a, c: m, b } => {
                 let mut v = Vec::new();
@@ -581,13 +691,59 @@ impl Element {
         }
     }
 
-    /// The profile and its center, for the integrator's step control.
-    pub(crate) fn as_profile(&self) -> Option<(&Profile, f64)> {
+    /// Whether the element is a polynomial between its knots (so products of two are integrated
+    /// exactly by the 4-point rule).
+    pub(crate) fn is_polynomial(&self) -> bool {
+        match self {
+            Element::Profile { .. } => false,
+            Element::Mapped { inner, map, .. } => map.is_affine() && inner.is_polynomial(),
+            _ => true,
+        }
+    }
+
+    /// The largest 8-point Gauss–Legendre sub-interval starting at x and moving right.
+    pub(crate) fn step_limit(&self, x: f64) -> f64 {
         match self {
             Element::Profile {
                 profile, center, ..
-            } => Some((profile, *center)),
-            _ => None,
+            } => {
+                // nondecreasing in the distance from the center, so take it at the end nearest
+                // the center
+                if x >= *center {
+                    profile.step(x - center)
+                } else {
+                    let d = center - x;
+                    profile.step((d - profile.step(d)).max(0.0))
+                }
+            }
+            Element::Mapped { inner, map, .. } => {
+                // the inner limit in either direction, converted to x; |du/dx| changes by at
+                // most 21 % over the map's own step of 0.1·|x|, covered by the factor 0.7
+                let u = map.inverse(x);
+                let su = inner.step_limit_symmetric(u);
+                let h = if su.is_finite() {
+                    0.7 * su / map.d_inverse(x).abs()
+                } else {
+                    f64::INFINITY
+                };
+                h.min(0.5 * map.step(x))
+            }
+            _ => f64::INFINITY,
+        }
+    }
+
+    /// As [`Element::step_limit`] for a sub-interval starting at u in either direction.
+    fn step_limit_symmetric(&self, u: f64) -> f64 {
+        match self {
+            Element::Profile {
+                profile, center, ..
+            } => {
+                let d = (u - center).abs();
+                profile.step((d - profile.step(d)).max(0.0))
+            }
+            // nested maps: u is this element's own coordinate
+            Element::Mapped { .. } => self.step_limit(u),
+            _ => f64::INFINITY,
         }
     }
 
@@ -599,6 +755,15 @@ impl Element {
             Element::Hat { a, b, .. } => Some(0.5 * (b - a)),
             Element::Piecewise { shape, stretch, .. } => Some(stretch * shape.integral()),
             Element::Profile { .. } => None,
+            Element::Mapped {
+                inner,
+                map: CoordinateMap::Affine { scale, .. },
+                jacobian,
+                ..
+            } => inner
+                .polynomial_integral()
+                .map(|v| if *jacobian { v } else { v * scale.abs() }),
+            Element::Mapped { .. } => None,
         }
     }
 
@@ -638,6 +803,22 @@ impl Element {
                 for s in shape.segments() {
                     push(center + stretch * s.a);
                     push(center + stretch * s.b);
+                }
+            }
+            Element::Mapped {
+                inner,
+                map,
+                lo: l,
+                hi: h,
+                ..
+            } => {
+                push(*l);
+                push(*h);
+                let (a, b) = (map.inverse(lo.max(*l)), map.inverse(hi.min(*h)));
+                let mut inner_knots = Vec::new();
+                inner.push_knots(a.min(b), a.max(b), &mut inner_knots);
+                for u in inner_knots {
+                    push(map.forward(u));
                 }
             }
         }

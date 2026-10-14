@@ -370,6 +370,24 @@ impl PySpace {
         ))
     }
 
+    /// The elements as functions of x = forward(u): kind "reciprocal" (x = a / u) or "affine"
+    /// (x = a + b·u).
+    fn mapped(&self, kind: &str, a: f64, b: f64, jacobian: bool) -> PyResult<Self> {
+        let map = match kind {
+            "reciprocal" => rebasis::CoordinateMap::Reciprocal { k: a },
+            "affine" => rebasis::CoordinateMap::Affine {
+                offset: a,
+                scale: b,
+            },
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "map kind must be 'reciprocal' or 'affine', got {other:?}"
+                )));
+            }
+        };
+        space(self.inner.mapped(map, jacobian))
+    }
+
     fn derivative(&self, order: usize) -> PyResult<Self> {
         space(self.inner.derivative(order))
     }
