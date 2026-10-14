@@ -194,6 +194,37 @@ pub enum Profile {
         apodization: Apodization,
         inv_peak: f64,
     },
+    /// A Matérn correlation function with length scale `length`: order ½ is the exponential
+    /// exp(−|t|/ℓ), 3/2 is (1 + u) e^(−u) with u = √3 |t|/ℓ, 5/2 is (1 + u + u²/3) e^(−u) with
+    /// u = √5 |t|/ℓ. Used as prior covariances; the support is `cutoff` lengths either side.
+    Matern { order: MaternOrder, length: f64 },
+    /// cos(2π k (center + t) / P + phase): a harmonic of period P in absolute coordinates
+    /// (phase −π/2 gives the sine). Not a line shape: a basis function for periodic structure
+    /// (longitude waves, annual cycles), on the support it is given.
+    Harmonic {
+        wavenumber: f64,
+        period: f64,
+        phase: f64,
+    },
+}
+
+/// The smoothness ν of a [`Profile::Matern`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaternOrder {
+    Half,
+    ThreeHalves,
+    FiveHalves,
+}
+
+impl MaternOrder {
+    /// The u = rate·|t|/ℓ of the closed forms.
+    fn rate(&self) -> f64 {
+        match self {
+            MaternOrder::Half => 1.0,
+            MaternOrder::ThreeHalves => 3f64.sqrt(),
+            MaternOrder::FiveHalves => 5f64.sqrt(),
+        }
+    }
 }
 
 fn positive(name: &str, v: f64) -> Result<()> {
@@ -270,6 +301,25 @@ impl Profile {
         })
     }
 
+    pub fn matern(order: MaternOrder, length: f64) -> Result<Self> {
+        positive("length", length)?;
+        Ok(Profile::Matern { order, length })
+    }
+
+    /// cos(2π k x / P + phase) in absolute coordinates for an element centred at `center`.
+    pub fn harmonic(wavenumber: f64, period: f64, phase: f64, center: f64) -> Result<Self> {
+        positive("wavenumber", wavenumber)?;
+        positive("period", period)?;
+        if !(phase.is_finite() && center.is_finite()) {
+            return invalid("harmonic phase and center must be finite");
+        }
+        Ok(Profile::Harmonic {
+            wavenumber,
+            period,
+            phase: phase + 2.0 * std::f64::consts::PI * wavenumber * center / period,
+        })
+    }
+
     pub fn fts(max_opd: f64, apodization: Apodization) -> Result<Self> {
         positive("max_opd", max_opd)?;
         let peak = apodization.line_shape(0.0);
@@ -327,6 +377,20 @@ impl Profile {
                 apodization,
                 inv_peak,
             } => apodization.line_shape(2.0 * std::f64::consts::PI * max_opd * t) * inv_peak,
+            Profile::Harmonic {
+                wavenumber,
+                period,
+                phase,
+            } => (2.0 * std::f64::consts::PI * wavenumber * t / period + phase).cos(),
+            Profile::Matern { order, length } => {
+                let u = order.rate() * t.abs() / length;
+                let poly = match order {
+                    MaternOrder::Half => 1.0,
+                    MaternOrder::ThreeHalves => 1.0 + u,
+                    MaternOrder::FiveHalves => 1.0 + u + u * u / 3.0,
+                };
+                poly * (-u).exp()
+            }
         }
     }
 
@@ -380,6 +444,29 @@ impl Profile {
             } => {
                 let k = 2.0 * pi * max_opd;
                 k * apodization.line_shape_derivative(k * t) * inv_peak
+            }
+            Profile::Harmonic {
+                wavenumber,
+                period,
+                phase,
+            } => {
+                let w = 2.0 * std::f64::consts::PI * wavenumber / period;
+                -w * (w * t + phase).sin()
+            }
+            Profile::Matern { order, length } => {
+                let a = order.rate() / length;
+                let u = a * t.abs();
+                match order {
+                    MaternOrder::Half => {
+                        if t == 0.0 {
+                            0.0
+                        } else {
+                            -t.signum() * a * (-u).exp()
+                        }
+                    }
+                    MaternOrder::ThreeHalves => -a * a * t * (-u).exp(),
+                    MaternOrder::FiveHalves => -a * a * t / 3.0 * (1.0 + u) * (-u).exp(),
+                }
             }
         }
     }
@@ -521,6 +608,19 @@ impl Profile {
             } => half_width.max(0.5 * FWHM_PER_SIGMA * sigma),
             // first zero of the unapodized sinc
             Profile::Fts { max_opd, .. } => 0.5 / max_opd,
+            // a quarter wavelength
+            Profile::Harmonic {
+                wavenumber, period, ..
+            } => 0.25 * period / wavenumber,
+            // the roots of the closed forms at one half, divided by the rate
+            Profile::Matern { order, length } => {
+                let u = match order {
+                    MaternOrder::Half => std::f64::consts::LN_2,
+                    MaternOrder::ThreeHalves => 1.678_346_990_016_660_5,
+                    MaternOrder::FiveHalves => 2.330_256_192_156_007,
+                };
+                u * length / order.rate()
+            }
         }
     }
 
@@ -538,6 +638,9 @@ impl Profile {
             Profile::SmoothedBox {
                 half_width, sigma, ..
             } => (half_width + cutoff * sigma, half_width + cutoff * sigma),
+            Profile::Matern { length, .. } => (cutoff * length, cutoff * length),
+            // the half width of the domain, in absolute units
+            Profile::Harmonic { .. } => (cutoff, cutoff),
             _ => (cutoff * self.hwhm(), cutoff * self.hwhm()),
         };
         Ok(r)
@@ -570,6 +673,12 @@ impl Profile {
             Profile::SmoothedBox { sigma, .. } => sigma,
             // band-limited to |δ| <= L: a quarter period of the fastest oscillation
             Profile::Fts { max_opd, .. } => 0.25 / max_opd,
+            // polynomial × exponential on each side of the (knotted) center
+            Profile::Matern { order, length } => 0.5 * length / order.rate(),
+            // a quarter wavelength, as for the FTS line shapes
+            Profile::Harmonic {
+                wavenumber, period, ..
+            } => 0.25 * period / wavenumber,
         }
     }
 }
@@ -609,6 +718,24 @@ mod tests {
         }
         let v = Profile::voigt(0.3, 0.2).unwrap();
         assert!((v.value(v.hwhm()) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn matern_half_maxima_and_slopes() {
+        for order in [
+            MaternOrder::Half,
+            MaternOrder::ThreeHalves,
+            MaternOrder::FiveHalves,
+        ] {
+            let p = Profile::matern(order, 2.0).unwrap();
+            assert_eq!(p.value(0.0), 1.0);
+            assert!((p.value(p.hwhm()) - 0.5).abs() < 1e-15, "{order:?}");
+            for t in [-1.3, 0.4, 3.0] {
+                let h = 1e-6;
+                let fd = (p.value(t + h) - p.value(t - h)) / (2.0 * h);
+                assert!((p.d_dt(t) - fd).abs() < 1e-8, "{order:?} {t}");
+            }
+        }
     }
 
     #[test]

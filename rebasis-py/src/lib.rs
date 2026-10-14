@@ -171,6 +171,19 @@ impl PySpace {
     }
 
     #[staticmethod]
+    fn harmonics(n: usize, period: f64, start: f64) -> PyResult<Self> {
+        space(rebasis::Space::harmonics(n, period, start))
+    }
+
+    #[staticmethod]
+    fn bsplines_periodic(breakpoints: Bound<'_, PyArray1<f64>>, degree: usize) -> PyResult<Self> {
+        space(rebasis::Space::bsplines_periodic(
+            &read_vec(&breakpoints, "breakpoints")?,
+            degree,
+        ))
+    }
+
+    #[staticmethod]
     fn bsplines_clamped(breakpoints: Bound<'_, PyArray1<f64>>, degree: usize) -> PyResult<Self> {
         space(rebasis::Space::bsplines_clamped(
             &read_vec(&breakpoints, "breakpoints")?,
@@ -386,6 +399,10 @@ impl PySpace {
             }
         };
         space(self.inner.mapped(map, jacobian))
+    }
+
+    fn take(&self, indices: Vec<usize>) -> PyResult<Self> {
+        space(self.inner.select(&indices))
     }
 
     fn derivative(&self, order: usize) -> PyResult<Self> {
@@ -631,6 +648,146 @@ impl PyFit {
     }
 }
 
+/// One dimension of a separable covariance: (family, length, period or None, variance profile
+/// as (basis, coefficients) or None).
+type DimSpec<'py> = (
+    String,
+    f64,
+    Option<f64>,
+    Option<(Bound<'py, PySpace>, Vec<f64>)>,
+);
+
+fn product_covariance(
+    variance: f64,
+    dims: Vec<DimSpec<'_>>,
+) -> PyResult<rebasis::ProductCovariance> {
+    if !(variance.is_finite() && variance > 0.0) {
+        return Err(PyValueError::new_err(format!(
+            "variance must be finite and > 0, got {variance}"
+        )));
+    }
+    let dims =
+        dims.into_iter()
+            .map(|(family, length, period, profile)| {
+                let f = rebasis::Family::by_name(&family)?;
+                let c = rebasis::Covariance1d::new(f, length, period)?;
+                Ok(match profile {
+                    None => c,
+                    Some((basis, coeffs)) => c.with_variance_profile(
+                        rebasis::VarianceProfile::new(&basis.get().inner, &coeffs)?,
+                    ),
+                })
+            })
+            .collect::<rebasis::Result<Vec<_>>>()
+            .map_err(to_pyerr)?;
+    Ok(rebasis::ProductCovariance { variance, dims })
+}
+
+fn weights(w: Vec<Option<f64>>) -> PyResult<Vec<Weight>> {
+    w.into_iter().map(weight).collect()
+}
+
+/// The covariance matrix between product atoms a (rows) and b (columns); see
+/// `rebasis.covariance`.
+#[pyfunction]
+#[pyo3(signature = (variance, dims, a, wa, b, wb, symmetric=false))]
+#[allow(clippy::too_many_arguments)]
+fn covariance_matrix<'py>(
+    py: Python<'py>,
+    variance: f64,
+    dims: Vec<DimSpec<'py>>,
+    a: Vec<Bound<'py, PySpace>>,
+    wa: Vec<Option<f64>>,
+    b: Vec<Bound<'py, PySpace>>,
+    wb: Vec<Option<f64>>,
+    symmetric: bool,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let cov = product_covariance(variance, dims)?;
+    let (wa, wb) = (weights(wa)?, weights(wb)?);
+    let a: Vec<&rebasis::Space> = a.iter().map(|s| &s.get().inner).collect();
+    let b: Vec<&rebasis::Space> = b.iter().map(|s| &s.get().inner).collect();
+    let m = py
+        .detach(|| {
+            cov.matrix(
+                rebasis::Atoms {
+                    spaces: &a,
+                    weights: &wa,
+                },
+                rebasis::Atoms {
+                    spaces: &b,
+                    weights: &wb,
+                },
+                symmetric,
+            )
+        })
+        .map_err(to_pyerr)?;
+    array2(py, m)
+}
+
+type MatrixAndDerivatives<'py> = (
+    Bound<'py, PyArray2<f64>>,
+    Vec<Bound<'py, PyArray2<f64>>>,
+    Vec<Vec<Bound<'py, PyArray2<f64>>>>,
+);
+
+/// The symmetric covariance K of atoms a and ℓ_d ∂K/∂ℓ_d for each dimension d.
+#[pyfunction]
+fn covariance_length_derivatives<'py>(
+    py: Python<'py>,
+    variance: f64,
+    dims: Vec<DimSpec<'py>>,
+    a: Vec<Bound<'py, PySpace>>,
+    wa: Vec<Option<f64>>,
+) -> PyResult<MatrixAndDerivatives<'py>> {
+    let cov = product_covariance(variance, dims)?;
+    let wa = weights(wa)?;
+    let a: Vec<&rebasis::Space> = a.iter().map(|s| &s.get().inner).collect();
+    let (k, g, gp) = py
+        .detach(|| {
+            cov.matrix_with_derivatives(rebasis::Atoms {
+                spaces: &a,
+                weights: &wa,
+            })
+        })
+        .map_err(to_pyerr)?;
+    let gp = gp
+        .into_iter()
+        .map(|ms| {
+            ms.into_iter()
+                .map(|m| array2(py, m))
+                .collect::<PyResult<Vec<_>>>()
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let g = g
+        .into_iter()
+        .map(|m| array2(py, m))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((array2(py, k)?, g, gp))
+}
+
+/// The variances of product atoms a.
+#[pyfunction]
+fn covariance_diagonal<'py>(
+    py: Python<'py>,
+    variance: f64,
+    dims: Vec<DimSpec<'py>>,
+    a: Vec<Bound<'py, PySpace>>,
+    wa: Vec<Option<f64>>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let cov = product_covariance(variance, dims)?;
+    let wa = weights(wa)?;
+    let a: Vec<&rebasis::Space> = a.iter().map(|s| &s.get().inner).collect();
+    let d = py
+        .detach(|| {
+            cov.diagonal(rebasis::Atoms {
+                spaces: &a,
+                weights: &wa,
+            })
+        })
+        .map_err(to_pyerr)?;
+    Ok(PyArray1::from_vec(py, d))
+}
+
 /// Re w(x + iy) for y >= 0, w the Faddeeva function.
 #[pyfunction]
 fn faddeeva_re(x: f64, y: f64) -> f64 {
@@ -650,5 +807,8 @@ fn _rebasis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(measure_derivative, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate, m)?)?;
     m.add_function(wrap_pyfunction!(faddeeva_re, m)?)?;
+    m.add_function(wrap_pyfunction!(covariance_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(covariance_diagonal, m)?)?;
+    m.add_function(wrap_pyfunction!(covariance_length_derivatives, m)?)?;
     Ok(())
 }

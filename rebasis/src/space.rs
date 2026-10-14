@@ -80,7 +80,7 @@ fn bspline_value(t: &[f64], i: usize, d: usize, x: f64) -> f64 {
 }
 
 /// Coefficients q of the degree-d polynomial through (s_k, v_k), by Gaussian elimination.
-fn fit_polynomial(s: &[f64], v: &[f64]) -> [f64; 4] {
+pub(crate) fn fit_polynomial(s: &[f64], v: &[f64]) -> [f64; 4] {
     let n = s.len();
     let mut a = [[0.0; 5]; 4];
     for r in 0..n {
@@ -224,6 +224,90 @@ impl Space {
                 center,
                 1.0,
             )?);
+        }
+        Ok(Space::new(elements))
+    }
+
+    /// cos(2πkx/P) and sin(2πkx/P) for k = 1..=n (2n functions, in that order) on the domain
+    /// [start, start + period]: zonal waves, annual cycles. The constant is not included
+    /// (mean terms add their own).
+    pub fn harmonics(n: usize, period: f64, start: f64) -> Result<Self> {
+        if n == 0 {
+            return invalid("harmonics need n >= 1");
+        }
+        if !(period.is_finite() && period > 0.0 && start.is_finite()) {
+            return invalid("harmonics need a finite period > 0 and a finite start");
+        }
+        let center = start + 0.5 * period;
+        let mut elements = Vec::with_capacity(2 * n);
+        for k in 1..=n {
+            for phase in [0.0, -0.5 * std::f64::consts::PI] {
+                let p = Profile::harmonic(k as f64, period, phase, center)?;
+                elements.push(Element::profile(p, center, 0.5 * period)?);
+            }
+        }
+        Ok(Space::new(elements))
+    }
+
+    /// Periodic B-splines of `degree` (0..=3): `breakpoints` (strictly increasing) span one
+    /// period, from start to start + P; the len(breakpoints) − 1 functions wrap around it and
+    /// form a partition of unity on [start, start + P).
+    pub fn bsplines_periodic(breakpoints: &[f64], degree: usize) -> Result<Self> {
+        check_increasing("breakpoints", breakpoints, 2)?;
+        let m = breakpoints.len() - 1;
+        if degree > 3 || m < degree + 1 {
+            return invalid(format!(
+                "periodic degree-{degree} B-splines need degree <= 3 and at least {} intervals",
+                degree + 1
+            ));
+        }
+        let (x0, period) = (breakpoints[0], breakpoints[m] - breakpoints[0]);
+        // the knots extended periodically by `degree` on either side
+        let mut knots: Vec<f64> = (m - degree..m).map(|k| breakpoints[k] - period).collect();
+        knots.extend_from_slice(breakpoints);
+        knots.extend((1..=degree).map(|k| breakpoints[k] + period));
+        let extended = Space::bsplines(&knots, degree)?;
+        let mut elements = Vec::with_capacity(m);
+        for e in &extended.elements()[..m] {
+            let Element::Piecewise { shape, center, .. } = e else {
+                unreachable!("B-splines are piecewise")
+            };
+            // fold the pieces outside [x0, x0 + P) back into it
+            let mut segs: Vec<Segment> = shape
+                .segments()
+                .iter()
+                .map(|sg| {
+                    let (a, b) = (center + sg.a, center + sg.b);
+                    let shift = if b <= x0 + 1e-12 * period {
+                        period
+                    } else if a >= x0 + period - 1e-12 * period {
+                        -period
+                    } else {
+                        0.0
+                    };
+                    Segment {
+                        a: a + shift,
+                        b: b + shift,
+                        coeffs: sg.coeffs,
+                    }
+                })
+                .collect();
+            // shifting by ±P is inexact in floating point: snap every segment end to the
+            // breakpoint it is, so pieces meet exactly at the seam
+            let snap = |x: f64| {
+                let k = breakpoints.partition_point(|&b| b < x);
+                [k.saturating_sub(1), k.min(m)]
+                    .into_iter()
+                    .map(|i| breakpoints[i])
+                    .find(|b| (b - x).abs() < 1e-9 * period)
+                    .unwrap_or(x)
+            };
+            for sg in &mut segs {
+                sg.a = snap(sg.a);
+                sg.b = snap(sg.b);
+            }
+            segs.sort_by(|p, q| p.a.total_cmp(&q.a));
+            elements.push(Element::piecewise(Arc::new(Shape::new(segs)?), 0.0, 1.0)?);
         }
         Ok(Space::new(elements))
     }
@@ -374,6 +458,19 @@ impl Space {
                 .iter()
                 .map(|e| e.derivative(order))
                 .collect::<Result<_>>()?,
+        ))
+    }
+
+    /// The elements at `indices` (repeats allowed), in that order.
+    pub fn select(&self, indices: &[usize]) -> Result<Space> {
+        if let Some(&i) = indices.iter().find(|&&i| i >= self.len()) {
+            return invalid(format!(
+                "index {i} out of range for {} elements",
+                self.len()
+            ));
+        }
+        Ok(Space::new(
+            indices.iter().map(|&i| self.elements[i].clone()).collect(),
         ))
     }
 

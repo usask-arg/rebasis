@@ -67,25 +67,30 @@ fn step_at(elements: &[&Element], weight: Weight, x: f64) -> f64 {
 
 /// ∫ Π elements(x) · w(x) dx over [lo, hi] given the sorted knots inside it (inclusive of lo, hi).
 fn integrate_product(elements: &[&Element], weight: Weight, knots: &[f64]) -> f64 {
-    integrate_with(elements, weight, knots, |x| {
+    let high_degree = elements.len() > 2;
+    integrate_with(elements, weight, knots, high_degree, |x| {
         elements.iter().map(|e| e.evaluate(x)).product::<f64>()
     })
 }
 
 /// ∫ g(x) w(x) dx over the knots, with the step control of `elements` (g must be smooth
-/// between knots, on the scale of the elements' profiles).
+/// between knots, on the scale of the elements' profiles). With `high_degree` (products of
+/// three factors: polynomial parts up to degree 9) every piece uses the 8-point rule, exact to
+/// degree 15.
 fn integrate_with(
     elements: &[&Element],
     weight: Weight,
     knots: &[f64],
+    high_degree: bool,
     g: impl Fn(f64) -> f64,
 ) -> f64 {
     let f = |x: f64| g(x) * weight.value(x);
     let smooth = weight == Weight::Uniform && elements.iter().all(|e| e.is_polynomial());
     if smooth {
+        let rule = if high_degree { gl8() } else { gl4() };
         return knots
             .windows(2)
-            .map(|w| integrate(gl4(), w[0], w[1], f))
+            .map(|w| integrate(rule, w[0], w[1], f))
             .sum();
     }
     let mut total = 0.0;
@@ -102,7 +107,7 @@ fn integrate_with(
             // On a piece much shorter than the profile's scale (a fine grid under a wide line
             // shape) the integrand is nearly polynomial and 4 points are already exact to
             // rounding; see `short_pieces_need_fewer_points` below.
-            let rule = if h <= SHORT_PIECE * allowed {
+            let rule = if !high_degree && h <= SHORT_PIECE * allowed {
                 gl4()
             } else {
                 gl8()
@@ -206,7 +211,7 @@ pub fn inner_derivative(
     }
     sorted_knots(&[k, b], lo, hi, knots);
     // d_smooth only errors for an inapplicable parameter, which `jumps` has already rejected
-    let smooth = integrate_with(&[k, b], weight, knots, |x| {
+    let smooth = integrate_with(&[k, b], weight, knots, false, |x| {
         k.d_smooth(x, p).unwrap_or(0.0) * b.evaluate(x)
     });
     Ok(smooth + point)
@@ -228,7 +233,67 @@ pub fn integral_derivative(
     }
     let point: f64 = jumps.iter().map(|(x, a)| a * weight.value(*x)).sum();
     sorted_knots(&[k], k.lower(), k.upper(), knots);
-    let smooth = integrate_with(&[k], weight, knots, |x| k.d_smooth(x, p).unwrap_or(0.0));
+    let smooth = integrate_with(&[k], weight, knots, false, |x| {
+        k.d_smooth(x, p).unwrap_or(0.0)
+    });
+    Ok(smooth + point)
+}
+
+/// ⟨a, b · f⟩_w = ∫ a b f w: an inner product with an extra factor f (a variance profile),
+/// exact for piecewise polynomials and accurate to rounding with profiles.
+pub fn inner_with_factor(
+    a: &Element,
+    b: &Element,
+    f: &Element,
+    weight: Weight,
+    knots: &mut Vec<f64>,
+) -> f64 {
+    match (a, b) {
+        (Element::Delta { x }, other) | (other, Element::Delta { x }) => {
+            if matches!(other, Element::Delta { .. }) {
+                return inner(a, b, weight, knots) * f.evaluate(*x);
+            }
+            other.evaluate(*x) * f.evaluate(*x) * weight.value(*x)
+        }
+        _ => {
+            let lo = a.lower().max(b.lower()).max(f.lower());
+            let hi = a.upper().min(b.upper()).min(f.upper());
+            if hi <= lo {
+                return 0.0;
+            }
+            sorted_knots(&[a, b, f], lo, hi, knots);
+            integrate_product(&[a, b, f], weight, knots)
+        }
+    }
+}
+
+/// ∂/∂p ⟨k, b · f⟩_w for a parameter p of the kernel k (see [`inner_derivative`]).
+pub fn inner_derivative_with_factor(
+    k: &Element,
+    b: &Element,
+    f: &Element,
+    p: Parameter,
+    weight: Weight,
+    jumps: &[(f64, f64)],
+    knots: &mut Vec<f64>,
+) -> Result<f64> {
+    if matches!(k, Element::Delta { .. }) || matches!(b, Element::Delta { .. }) {
+        return crate::error::invalid("a variance factor needs non-delta elements here");
+    }
+    let point: f64 = jumps
+        .iter()
+        .filter(|(x, _)| *x >= b.lower() && *x <= b.upper())
+        .map(|(x, a)| a * b.evaluate(*x) * f.evaluate(*x) * weight.value(*x))
+        .sum();
+    let lo = k.lower().max(b.lower()).max(f.lower());
+    let hi = k.upper().min(b.upper()).min(f.upper());
+    if hi <= lo {
+        return Ok(point);
+    }
+    sorted_knots(&[k, b, f], lo, hi, knots);
+    let smooth = integrate_with(&[k, b, f], weight, knots, true, |x| {
+        k.d_smooth(x, p).unwrap_or(0.0) * b.evaluate(x) * f.evaluate(x)
+    });
     Ok(smooth + point)
 }
 

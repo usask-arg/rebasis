@@ -9,7 +9,9 @@ rebasis computes the (sparse) matrices that take f_j to
 - the coefficients g_i of the best (L2) representation Σ_i g_i G_i(x) of f in another space,
   for regridding: :class:`Projection`;
 - the coefficients of a model whose measurements match given data, for smooth conservative
-  upsampling and smoothing: :class:`Fit`.
+  upsampling and smoothing: :class:`Fit`;
+- optimal estimates of grid averages (e.g. monthly zonal means) from irregularly sampled
+  observations, with uncertainties and averaging kernels: :func:`optimal_estimate`.
 
 Elements are shapes, not densities: boxes, hats, B-splines and every line-shape profile peak
 at 1. A grid of hats, boxes or clamped B-splines is a partition of unity, so its coefficients
@@ -23,6 +25,17 @@ see :func:`rebasis.xarray.regrid`.
 from __future__ import annotations
 
 from . import _rebasis
+from ._estimate import (
+    Covariance,
+    CovarianceDim,
+    CovarianceSum,
+    Estimate,
+    MeanTerm,
+    VarianceProfile,
+    log_likelihood,
+    optimal_estimate,
+)
+from ._fit import CovarianceFit, fit_covariance
 from ._ops import (
     PARAMETERS,
     Fit,
@@ -56,18 +69,28 @@ def __getattr__(name: str):
 __all__ = [
     "FWHM_PER_SIGMA",
     "PARAMETERS",
+    "Covariance",
+    "CovarianceDim",
+    "CovarianceFit",
+    "CovarianceSum",
+    "Estimate",
     "Fit",
+    "MeanTerm",
     "Projection",
     "SingularError",
     "Space",
+    "VarianceProfile",
     "apply_along",
     "evaluate",
     "faddeeva_re",
     "fit",
+    "fit_covariance",
     "gram",
     "inner_products",
+    "log_likelihood",
     "measure",
     "measure_derivative",
+    "optimal_estimate",
     "project",
     "regrid",
     "regrid_nd",

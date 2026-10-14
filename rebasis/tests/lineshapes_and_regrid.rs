@@ -285,3 +285,60 @@ fn tabulated_pchip_and_linear_agree_on_linear_data() {
         assert!((a - b).abs() < 0.05 && (a - b).abs() > 0.0);
     }
 }
+
+#[test]
+fn harmonics_values_and_box_averages() {
+    let h = Space::harmonics(2, 360.0, 0.0).unwrap();
+    assert_eq!(h.len(), 4);
+    let xs = [0.0, 37.0, 181.5, 359.0];
+    let e = evaluate(&h, &xs).unwrap().to_dense();
+    for (r, &x) in xs.iter().enumerate() {
+        let a = x.to_radians();
+        let expected = [a.cos(), a.sin(), (2.0 * a).cos(), (2.0 * a).sin()];
+        for c in 0..4 {
+            assert!((e[[r, c]] - expected[c]).abs() < 1e-14, "{x} {c}");
+        }
+    }
+    // the full-circle average of each wave is zero; a partial box has a closed form
+    let boxes = Space::boxes(&[0.0, 360.0]).unwrap();
+    let full = measure(&boxes, &h, Normalization::Integral, U).to_dense();
+    assert!(full.iter().all(|v| v.abs() < 1e-14));
+    let part = Space::boxes(&[20.0, 130.0]).unwrap();
+    let w = measure(&part, &h, Normalization::Integral, U).to_dense();
+    let (a, b) = (20f64.to_radians(), 130f64.to_radians());
+    let width = b - a;
+    let expected = [
+        (b.sin() - a.sin()) / width,
+        (a.cos() - b.cos()) / width,
+        ((2.0 * b).sin() - (2.0 * a).sin()) / (2.0 * width),
+        ((2.0 * a).cos() - (2.0 * b).cos()) / (2.0 * width),
+    ];
+    for c in 0..4 {
+        assert!((w[[0, c]] - expected[c]).abs() < 1e-14, "{c}");
+    }
+}
+
+#[test]
+fn periodic_bsplines_wrap_and_partition_unity() {
+    let bp = [0.0, 40.0, 100.0, 170.0, 240.0, 300.0, 360.0];
+    for degree in 0..=3 {
+        let s = Space::bsplines_periodic(&bp, degree).unwrap();
+        assert_eq!(s.len(), 6);
+        let xs: Vec<f64> = (0..720).map(|k| k as f64 * 0.5).collect();
+        let e = evaluate(&s, &xs).unwrap();
+        for (x, v) in xs.iter().zip(e.row_sums()) {
+            assert!((v - 1.0).abs() < 1e-13, "degree {degree} at {x}: {v}");
+        }
+        let tp = std::f64::consts::TAU;
+        let odd: Vec<f64> = (0..=7).map(|k| 0.1 + tp * k as f64 / 7.0).collect();
+        let so = Space::bsplines_periodic(&odd, degree).unwrap();
+        let e = evaluate(&so, &[0.1, 1.0, 3.3, 6.3]).unwrap();
+        assert!(e.row_sums().iter().all(|v| (v - 1.0).abs() < 1e-12));
+        if degree >= 1 {
+            // continuous across the seam
+            let a = evaluate(&s, &[1e-9]).unwrap().to_dense();
+            let b = evaluate(&s, &[360.0 - 1e-9]).unwrap().to_dense();
+            assert!((&a - &b).iter().all(|d| d.abs() < 1e-8));
+        }
+    }
+}

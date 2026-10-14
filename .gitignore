@@ -12,3 +12,4 @@
 *.egg-info/
 .DS_Store
 examples/*.png
+examples/osiris/out/
