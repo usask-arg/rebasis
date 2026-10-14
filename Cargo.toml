@@ -11,7 +11,7 @@ repository = "https://github.com/usask-arg/rebasis"
 
 [workspace.dependencies]
 # 0.16 matches sasktran2, which will depend on the core crate.
-ndarray = { version = "0.16", features = ["rayon"] }
+ndarray = { version = "0.17", features = ["rayon"] }
 rayon = "1.10"
 thiserror = "2"
 
