@@ -27,10 +27,10 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update --component clippy,rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       # rebasis-py is built as an extension module (.cargo/config.toml), which needs no Python.
@@ -72,7 +72,7 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # rebasis-py has no Rust tests (test = false); it is tested from Python below.
@@ -91,7 +91,7 @@ jobs:
           persist-credentials: false
       - name: Install Rust 1.85.0
         run: rustup toolchain install 1.85.0 --profile minimal --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check the libraries
@@ -122,12 +122,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build the abi3 wheel once
@@ -137,7 +137,7 @@ jobs:
           python -m pip install --only-binary :all: "$(ls dist/*.whl)[test]" \
             ${NUMPY:+"numpy==$NUMPY"} ${NUMPY:+"scipy<1.15"}
           python -m pytest -q
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: ${{ !matrix.numpy }}
         with:
           python-version: "3.14"
@@ -160,10 +160,10 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           python-version: "3.12"
       # -E rereads every source, -W makes every warning an error; the pages are executed.
